@@ -1,7 +1,7 @@
 ###################################################
-# nyt.R
-# Script for downloading NYT cases and deaths data
-# NYT data repo: https://github.com/nytimes/covid-19-data
+# jhu.R
+# Script for downloading JHU cases and deaths data
+# JHU data repo: https://github.com/CSSEGISandData/COVID-19
 ###################################################
 library(tidyverse)
 
