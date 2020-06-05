@@ -2,26 +2,21 @@
 # jhu.R
 # Script for downloading JHU cases and deaths data
 # JHU data repo: https://github.com/CSSEGISandData/COVID-19
+# Subrepo: https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_time_series
 ###################################################
 library(tidyverse)
 
 today <- str_sub(Sys.Date(), start = 6L)
 
-counties <- read_csv("https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-counties.csv")
-states <- read_csv("https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-states.csv")
-us <- read_csv("https://raw.githubusercontent.com/nytimes/covid-19-data/master/us.csv")
+confirmed <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv")
+deaths <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv")
 
-county.name <- "nyt-us-counties.csv"
-write.csv(counties, paste0("data/raw/cases-deaths/nyt/", county.name), row.names=FALSE)
-prior.county.name <- paste0("nyt-us-counties-", today, ".csv")
-write.csv(counties, paste0("data/raw/cases-deaths/nyt/prior/", prior.county.name), row.names=FALSE)
+confirmed.name <- "jhu-timeseries-confirmed.csv"
+write.csv(confirmed, paste0("data/raw/cases-deaths/jhu/", confirmed.name), row.names=FALSE)
+prior.confirmed.name <- paste0("jhu-timeseries-confirmed-", today, ".csv")
+write.csv(confirmed, paste0("data/raw/cases-deaths/jhu/prior/", prior.confirmed.name), row.names=FALSE)
 
-state.name <- "nyt-us-states.csv"
-write.csv(states, paste0("data/raw/cases-deaths/nyt/", state.name), row.names=FALSE)
-prior.state.name <- paste0("nyt-us-states-", today, ".csv")
-write.csv(states, paste0("data/raw/cases-deaths/nyt/prior/", prior.state.name), row.names=FALSE)
-
-us.name <- "nyt-us.csv"
-write.csv(us, paste0("data/raw/cases-deaths/nyt/", us.name), row.names=FALSE)
-prior.us.name <- paste0("nyt-us-", today, ".csv")
-write.csv(us, paste0("data/raw/cases-deaths/nyt/prior/", prior.us.name), row.names=FALSE)
+deaths.name <- "jhu-timeseries-deaths.csv"
+write.csv(deaths, paste0("data/raw/cases-deaths/jhu/", deaths.name), row.names=FALSE)
+prior.deaths.name <- paste0("jhu-timeseries-deaths-", today, ".csv")
+write.csv(deaths, paste0("data/raw/cases-deaths/jhu/prior/", prior.deaths.name), row.names=FALSE)

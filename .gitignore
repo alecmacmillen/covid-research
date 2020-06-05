@@ -4,7 +4,8 @@
 .Ruserdata
 
 ### Data to ignore
-# raw
-# cases-deaths
-data/raw/cases-deaths/nyt/prior/
-data/raw/cases-deaths/jhu/prior/
+data/raw/*
+data/interim/*
+data/external/*
+data/processed/*
+data/*

@@ -1,0 +1,197 @@
+---
+title: "social_distancing"
+author: "Alec MacMillen"
+date: "6/5/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stargazer)
+library(lubridate)
+library(plm)
+library(lmtest)
+library(broom)
+library(lfe)
+library(tidyverse)
+library(stargazer)
+```
+
+```{r}
+data <- read_csv("../../../data/processed/allcott/social-distancing/allcott_repl_social_distancing.csv.gz")
+```
+
+```{r}
+# Move the logging of the depvars back to the cleaning script
+data.prepped <- data %>% 
+  filter(!is.na(trump_vote_share)) %>% 
+  mutate(log_devices_leaving = log(device_count - completely_home_device_count + 1),
+         log_median_home_dwell = log(median_home_dwell_time + 1),
+         week_factor = as.factor(week_start_date),
+         Party = as.factor(ifelse(trump_vote_share>=.5, "Republican", "Democrat")))
+
+
+graph1 <- data.prepped %>% 
+  group_by(county_fips) %>% 
+  mutate(baseline_sdlh = ifelse(week_start_date == as.Date("2020-01-27", "%Y-%m-%d"), 
+                                share_devices_leaving_home, NA),
+         baseline_mhdt = ifelse(week_start_date == as.Date("2020-01-27", "%Y-%m-%d"),
+                                median_home_dwell_time, NA)) %>% 
+  fill(baseline_sdlh, baseline_mhdt) %>% 
+  mutate(normalized_sdlh = share_devices_leaving_home / baseline_sdlh,
+         normalized_mhdt = median_home_dwell_time / baseline_mhdt) %>% 
+  ungroup() %>% 
+  group_by(week_start_date, Party) %>% 
+  summarize(mean_sdlh = mean(normalized_sdlh, na.rm=TRUE),
+            mean_mhdt = mean(normalized_mhdt, na.rm=TRUE))
+
+party.colors <- c("#1000f7", "#f20019")
+
+ggplot(graph1, aes(x=week_start_date, y=mean_sdlh, color=Party)) +
+  geom_line() +
+  scale_color_manual(values=party.colors) +
+  theme_bw() +
+  guides(color=guide_legend(title="County partisan lean")) +
+  labs(x="Date",
+       y="Normalized share of devices leaving home",
+       title="Democratic and Republican counties behave differently, even to the end of May",
+       subtitle="Normalized share of mobile devices leaving home by week and county partisan lean")
+  
+```
+
+```{r}
+ggplot(graph1, aes(x=week_start_date, y=mean_mhdt, color=Party)) +
+  geom_line() +
+  scale_color_manual(values=party.colors) +
+  theme_bw() +
+  guides(color=guide_legend(title="County partisan lean")) +
+  labs(x="Date",
+       y="Normalized median home-dwelling time",
+       title="Residents of Democratic-leaning counties are likelier to spend more time at home",
+       subtitle="Normalized median homeo dwelling time by week and county partisan lean")
+```
+
+
+```{r}
+dates <- as.data.frame(table(data.prepped$week_start_date))
+coefs <- list()
+resids <- list()
+i <- 1
+for (date in dates$Var1) {
+  print(date)
+  subset <- data.prepped %>% filter(week_start_date == as.Date(date, "%Y-%m-%d"))
+  print(nrow(subset))
+  model <- plm(log_devices_leaving ~ trump_vote_share, 
+               data=subset, index="county_fips", model="within", effect="twoways")
+  coefs[[i]] <- model$coefficients[2]
+  resids[[i]] <- model$residuals[2]
+  i <- i + 1
+}
+
+low <- c()
+high <- c()
+i <- 1
+for (date in dates$var1) {
+  subset <- data.prepped %>% filter(week_start_date == as.Date(date, "%Y-%m-%d"))
+  dem <- subset %>% filter(Party=="Democrat") %>% select(share_devices_leaving_home) %>% .[[1]]
+  rep <- subset %>% filter(Party=="Republican") %>% select(share_devices_leaving_home) %>% .[[1]]
+  t.obj <- t.test(dem, rep)
+  low[[i]] <- t.obj$conf.int[1]
+  high[[i]] <- t.obj$conf.int[2]
+  i <- i + 1
+}
+
+make.it <- function(date) {
+  subset <- data.prepped %>% filter(week_start_date==as.Date(date, "%Y-%m-%d"))
+  dem <- subset %>% filter(Party=="Democrat") %>% select(share_devices_leaving_home) %>% .[[1]]
+  rep <- subset %>% filter(Party=="Republican") %>% select(share_devices_leaving_home) %>% .[[1]]
+  t.obj <- t.test(dem, rep)
+  t.obj$conf.int
+}
+
+ints <- list()
+i <- 1
+for (date in dates$var1) {
+  print(date)
+  ints[[i]] <- make.it(date)
+  i <- i + 1
+}
+
+low <- c()
+high <- c()
+dem <- data.prepped %>% filter(week_start_date == as.Date(dates$Var1[18], "%Y-%m-%d")) %>% 
+  filter(Party=="Democrat") %>% select(share_devices_leaving_home) %>% .[[1]]
+rep <- data.prepped %>% filter(week_start_date == as.Date(dates$Var1[18], "%Y-%m-%d")) %>% 
+  filter(Party=="Republican") %>% select(share_devices_leaving_home) %>% .[[1]]
+low <- c(low, t.test(dem, rep)$conf.int[1])
+high <- c(high, t.test(dem, rep)$conf.int[2])
+
+cis <- cbind(dates, tibble(low, high)) %>% 
+  mutate(point = (low+high)/2)
+
+ggplot(cis) +
+  geom_pointrange(mapping=aes(x=Var1, y=point, ymin=low, ymax=high)) +
+  geom_point(mapping=aes(x=Var1, y=point), color="red", size=3) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  ylim(-.08, .02) +
+  labs(x="Week", y="Estimated difference between counties by partisanship",
+       title="By-partisan mobility differences persist even to the end of May",
+       subtitle="Median share of devices leaving home by week, 1/27/20-5/25/20") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90))
+```
+
+```{r}
+low2 <- c()
+high2 <- c()
+dem <- data.prepped %>% filter(week_start_date == as.Date(dates$Var1[18], "%Y-%m-%d")) %>% 
+  filter(Party=="Democrat") %>% select(log_median_home_dwell) %>% .[[1]]
+rep <- data.prepped %>% filter(week_start_date == as.Date(dates$Var1[18], "%Y-%m-%d")) %>% 
+  filter(Party=="Republican") %>% select(log_median_home_dwell) %>% .[[1]]
+low2 <- c(low2, t.test(dem, rep)$conf.int[1])
+high2 <- c(high2, t.test(dem, rep)$conf.int[2])
+
+cis2 <- cbind(dates, tibble(low2, high2)) %>% 
+  mutate(point = (low2+high2)/2)
+
+ggplot(cis2) +
+  geom_pointrange(mapping=aes(x=Var1, y=point, ymin=low2, ymax=high2)) +
+  geom_point(mapping=aes(x=Var1, y=point), color="red", size=3) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  labs(x="Week", y="Estimated difference between counties by partisanship",
+       title="By-partisan mobility differences persist even to the end of May",
+       subtitle="Percent difference in median home dwell time, 1/27/20-5/25/20") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90))
+```
+
+```{r}
+w9.dem <- data.prepped %>% 
+  filter(week_start_date == as.Date("2020-03-23", "%Y-%m-%d") & Party=="Democrat") %>% 
+  select(share_devices_leaving_home) %>% .[[1]]
+
+w9.rep <- data.prepped %>% 
+  filter(week_start_date == as.Date("2020-03-23", "%Y-%m-%d") & Party=="Republican") %>% 
+  select(share_devices_leaving_home) %>% .[[1]]
+w9.t <- t.test(w9.dem, w9.rep)
+
+
+
+test <- plm(log_devices_leaving ~ trump_vote_share,
+            data = subset, index=c("county_fips"), model="within", effect="twoways")
+
+
+app.a8.a1 <- lm(log_devices_leaving ~ trump_vote_share + week_factor - 1, 
+                data = data.prepped)
+stargazer(app.a8.a1, type="text")
+
+app.a8.a3 <- lm(log_median_home_dwell ~ trump_vote_share, 
+                data = data.prepped)
+stargazer(app.a8.a3, type="text")
+
+app.a8.a1.b <- plm(log_devices_leaving ~ trump_vote_share + week_factor - 1,
+                   data = data.prepped,
+                   index = c("county_fips", "week_factor"),
+                   model = "within",
+                   effect = "twoways")
+```
