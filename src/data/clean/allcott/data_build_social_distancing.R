@@ -15,9 +15,7 @@ library(tidyverse)
 # STEP ONE: Read in safegraph social distancing cleaned data
 # Cleaning process: src/data/clean/mobility/safegraph/social-distancing/process_social_distancing.R
 ###########
-social.distancing <- read_csv("data/interim/mobility/safegraph/social-distancing/social_distancing_weekly.csv.gz") %>% 
-  # Create share of devices leaving home var
-  mutate(share_devices_leaving_home = (device_count - completely_home_device_count)/device_count)
+social.distancing <- read_csv("data/interim/mobility/safegraph/social-distancing/social_distancing_weekly.csv.gz")
 
 ###########
 # STEP TWO: Merge in census data (2016 ACS)
@@ -64,15 +62,27 @@ merge5 <- merge4 %>%
 # STEP SIX: Minor variable prettifying/cleanup/reordering
 ###########
 processed <- merge5 %>% 
-  mutate(log_cases = log(1+mean_cases),
-         log_deaths = log(1+mean_deaths)) %>% 
-  select(-c(state_sip_start_date, state_sip_end_date, county_sip_start_date, county_sip_end_date, mean_cases, mean_deaths)) %>% 
-  select(state, county, county_fips, week_start_date, device_count, completely_home_device_count,
-         median_home_dwell_time, share_devices_leaving_home, trump_vote_share, everything())
+  select(-c(state_sip_start_date, state_sip_end_date, county_sip_start_date, county_sip_end_date, mean_cases, mean_deaths)) %>%
+  select(state, county, county_fips, week_start_date, everything())
 
-# write_csv(processed, "data/processed/allcott/social-distancing/allcott_repl_social_distancing.csv.gz")
+###########
+# STEP SEVEN: Check coverage
+###########
+n <- nrow(processed)
+for (col in names(processed)) {
+  print(paste0(col, " summary:"))
+  print(summary(processed[[col]]))
+  print(paste0(col, " null %:"))
+  print(sum(is.na(processed[[col]]))/n)
+}
 
-# THINGS TO GO BACK AND FIX LATER:
-# Deal with/drop the NYC + KC counties (aggregate? This just takes a little time to think + work through)
-# Add health controls for log of 1 + county pop density; share of pop 65+
-# Double check nulls
+###########
+# STEP EIGHT: Drop obs where independent variable (trump_vote_share) is null
+# And generate indicator variable for Republican-leaning county, and percentile of Trump voteshare
+###########
+processed.out <- processed %>% 
+  filter(!is.na(trump_vote_share)) %>% 
+  mutate(county_republican = ifelse(trump_vote_share >= .5, 1, 0),
+         republican_vtsh_ntile = ntile(trump_vote_share, 100))
+
+# write_csv(processed.out, "data/processed/allcott/social-distancing/allcott_social_distancing_build.csv.gz")

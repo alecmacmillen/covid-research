@@ -25,7 +25,8 @@ for (path in all.files) {
     mutate(block_group = str_pad(as.character(origin_census_block_group), 12, side=c("left"), pad="0"),
            county_fips = str_sub(block_group, start=1L, end=5L),
            date = as.Date(str_sub(date_range_start, start=1L, end=10L), "%Y-%m-%d")) %>% 
-    select(county_fips, date, device_count, completely_home_device_count, median_home_dwell_time)
+    select(county_fips, date, device_count, completely_home_device_count, median_home_dwell_time,
+           median_non_home_dwell_time, candidate_device_count)
   all.dfs[[i]] <- df
   i <- i + 1
 }
@@ -48,17 +49,30 @@ asd.munge <- all.social.distancing %>%
   # Drop Alaska
   filter(state_fips != "02") %>% 
   # Drop county_fips without full coverage
-  filter(!(county_fips %in% fips.not.full))
+  filter(!(county_fips %in% fips.not.full)) %>% 
+  mutate(share_of_devices = 1 - (completely_home_device_count / device_count),
+         share_of_candidate_devices = 1 - (completely_home_device_count / candidate_device_count))
 
-
+### STOP HERE and do "initial_device_count" from Appendix A8 panel B
+initial_device_count <- asd.munge %>% 
+  filter(date >= as.Date("2020-01-27", "%Y-%m-%d") & date <= as.Date("2020-02-02", "%Y-%m-%d")) %>% 
+  group_by(county_fips) %>% 
+  summarize(initial_device_count = mean(device_count, na.rm=TRUE))
 
 
 # Create DAILY social distancing measure at county level by aggregating across block groups
 social.distancing.daily <- asd.munge %>% 
   select(-c(state_fips)) %>% 
+  left_join(initial_device_count, by=c("county_fips")) %>% 
+  mutate(numerator = ifelse(completely_home_device_count + initial_device_count - device_count < 0, 0,
+                            completely_home_device_count + initial_device_count - device_count),
+         share_adj_attrition = 1 - (numerator/initial_device_count)) %>% 
   group_by(county_fips, date) %>% 
   summarize(device_count = sum(device_count, na.rm=TRUE),
-            completely_home_device_count = sum(completely_home_device_count, na.rm=TRUE)) %>% 
+            completely_home_device_count = sum(completely_home_device_count, na.rm=TRUE),
+            share_of_devices = mean(share_of_devices, na.rm=TRUE),
+            share_of_candidate_devices = mean(share_of_candidate_devices, na.rm=TRUE),
+            share_adj_attrition = mean(share_adj_attrition, na.rm=TRUE)) %>% 
   ungroup() %>% 
   arrange(county_fips, date)
 
@@ -66,13 +80,25 @@ weighted.mean <- asd.munge %>%
   rename(device_count_new = device_count) %>% 
   select(-c(completely_home_device_count)) %>% 
   left_join(select(social.distancing.daily, county_fips, date, device_count), by=c("county_fips", "date")) %>% 
-  mutate(proportion = device_count_new / device_count,
-         product = proportion*median_home_dwell_time) %>% 
+  mutate(weight = device_count_new / device_count,
+         product1 = weight*median_home_dwell_time,
+         product2 = weight*median_non_home_dwell_time) %>% 
   group_by(county_fips, date) %>% 
-  summarize(median_home_dwell_time = mean(median_home_dwell_time, na.rm=TRUE))
+  summarize(median_home_dwell_time = sum(product1),
+            median_non_home_dwell_time = sum(product2)) %>% 
+  ungroup()
 
 social.distancing.daily.merge <- social.distancing.daily %>% 
-  left_join(weighted.mean, by=c("county_fips", "date"))
+  left_join(weighted.mean, by=c("county_fips", "date")) %>% 
+  mutate(devices_leaving_home = device_count - completely_home_device_count,
+         log_devices_leaving_home = log(1 + devices_leaving_home),
+         log_median_home_dwell_time = log(1 + median_home_dwell_time),
+         log_median_non_home_dwell_time = log(1 + median_non_home_dwell_time)) %>% 
+  select(county_fips, date, device_count, completely_home_device_count,
+         devices_leaving_home, log_devices_leaving_home, 
+         median_home_dwell_time, log_median_home_dwell_time,
+         median_non_home_dwell_time, log_median_non_home_dwell_time,
+         share_of_devices, share_of_candidate_devices, share_adj_attrition)
 
 # write_csv(social.distancing.daily.merge, "data/interim/mobility/safegraph/social-distancing/social_distancing_daily.csv.gz")
 
@@ -94,7 +120,10 @@ social.distancing.weekly <- social.distancing.daily.merge %>%
 social.distancing.weekly.summary <- social.distancing.weekly %>% 
   group_by(county_fips, week_start_date) %>% 
   summarize(device_count = sum(device_count, na.rm=TRUE),
-            completely_home_device_count = sum(completely_home_device_count, na.rm=TRUE)) %>% 
+            completely_home_device_count = sum(completely_home_device_count, na.rm=TRUE),
+            share_of_devices = mean(share_of_devices, na.rm=TRUE),
+            share_of_candidate_devices = mean(share_of_candidate_devices, na.rm=TRUE),
+            share_adj_attrition = mean(share_adj_attrition, na.rm=TRUE)) %>% 
   ungroup() %>% 
   arrange(county_fips, week_start_date)
 
@@ -102,15 +131,26 @@ weekly.weighted.mean <- social.distancing.weekly %>%
   rename(device_count_new = device_count) %>% 
   select(-c(completely_home_device_count)) %>% 
   left_join(select(social.distancing.weekly.summary, county_fips, week_start_date, device_count), by=c("county_fips", "week_start_date")) %>% 
-  mutate(proportion = device_count_new / device_count,
-         product = proportion*median_home_dwell_time) %>% 
+  mutate(weight = device_count_new / device_count,
+         product1 = weight*median_home_dwell_time,
+         product2 = weight*median_non_home_dwell_time) %>% 
   group_by(county_fips, week_start_date) %>% 
-  summarize(median_home_dwell_time = mean(median_home_dwell_time, na.rm=TRUE))
+  summarize(median_home_dwell_time = sum(product1, na.rm=TRUE),
+            median_non_home_dwell_time = sum(product2, na.rm=TRUE))
 
 social.distancing.weekly.merge <- social.distancing.weekly.summary %>% 
   left_join(weekly.weighted.mean, by=c("county_fips", "week_start_date")) %>% 
   mutate(week_start_date = as_date(week_start_date)) %>% 
-  filter(week_start_date != as.Date("2020-01-26", "%Y-%m-%d"))
+  filter(week_start_date != as.Date("2020-01-26", "%Y-%m-%d")) %>% 
+  mutate(devices_leaving_home = device_count - completely_home_device_count,
+         log_devices_leaving_home = log(1 + devices_leaving_home),
+         log_median_home_dwell_time = log(1 + median_home_dwell_time),
+         log_median_non_home_dwell_time = log(1 + median_non_home_dwell_time)) %>% 
+  select(county_fips, week_start_date, device_count, completely_home_device_count,
+         devices_leaving_home, log_devices_leaving_home, 
+         median_home_dwell_time, log_median_home_dwell_time,
+         median_non_home_dwell_time, log_median_non_home_dwell_time,
+         share_of_devices, share_of_candidate_devices, share_adj_attrition)
 
 # write_csv(social.distancing.weekly.merge, "data/interim/mobility/safegraph/social-distancing/social_distancing_weekly.csv.gz")
 

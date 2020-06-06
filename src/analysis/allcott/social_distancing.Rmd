@@ -1,173 +1,318 @@
 ---
-title: "social_distancing"
+title: "Social distancing, partisanship and SIPOs"
 author: "Alec MacMillen"
 date: "6/5/2020"
 output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
+rm(list=ls())
 knitr::opts_chunk$set(echo = TRUE)
 library(stargazer)
 library(lubridate)
 library(plm)
 library(lmtest)
 library(broom)
+library(multiwayvcov)
 library(lfe)
 library(tidyverse)
 library(stargazer)
 ```
 
+## 1. Topic and motivation
+
+Building on the work of Allcott et al (2020), I'm interested in exploring whether partisan differences in social distancing behavior persist even as states and counties start to transition out of shelter-in-place orders. The answer to this question has significant policy implications: voluntary social distancing even in absence of a formal SIPO could have positive public health benefits in continuing to hamper the spread of COVID-19 without a vaccine, while also dampening any potential economic impact of reopening society. I'll take Allcott et al's general framework for parsing partisan differences in mobility patterns and relate it directly to the start and end dates of SIPOs, to investigate whether the divergent trends they identify hold even on the back-end of shutdown policies.
+
+## 2. Read in built data
+
+Data gathering, cleaning and merging process stored at this repo: https://github.com/alecmacmillen/covid-research (data cleaning scripts in 'src' subfolder). Essentially, this built data has Safegraph social distancing metrics aggregated to the county-week level (devices leaving home, median time spent in and out of dwelling location, and the share of devices measures described in the footnote to Allcott Appendix A8); Trump vote share as the main independent variable, along with controls for demographics, public health (most significantly COVID-19 cases and deaths), weather, and policy responses (SIPOs).
+
 ```{r}
-data <- read_csv("../../../data/processed/allcott/social-distancing/allcott_repl_social_distancing.csv.gz")
+data <- read_csv("../../../data/processed/allcott/social-distancing/allcott_social_distancing_build.csv.gz")
+
+data %>% select(1:13) %>% head(10)
+data %>% select(14:26) %>% head(10)
+data %>% select(27:39) %>% head(10)
 ```
 
+## 3. Exploratory data analysis to replicate Allcott et al's findings
+
+For a quick visual reference validating the data build process, let's look at raw by-county partisanship differences in Safegraph social distancing measures. **Note: Allcott et al use POI visits as their main specification of the dependent variable. I'm still running the data build code for that data, since it's huge: 50+ GB. This is one of the major additions I'll make to this analysis for next week, Friday 6/12 (see "Next Steps" section at the end for a fuller summary).**
+
+Essentially, we want confirmation that partisan differences in social distancing behavior holds in this replicated dataset. I'll use Safegraph's social distancing measures (Allcott's alternative specification that they report in Appendix A8) as a proxy for now. The following code examines two variables: log devices leaving home (log of raw count of devices that leave their calculated geographic home area) and log median time spent at home, both for the county-week level. I set the measures for the week of 1/27/20 as the baseline values and calculate future weeks relative to that baseline.
+
+### 3A. Log of mobile devices leaving home
+
 ```{r}
-# Move the logging of the depvars back to the cleaning script
-data.prepped <- data %>% 
-  filter(!is.na(trump_vote_share)) %>% 
-  mutate(log_devices_leaving = log(device_count - completely_home_device_count + 1),
-         log_median_home_dwell = log(median_home_dwell_time + 1),
-         week_factor = as.factor(week_start_date),
-         Party = as.factor(ifelse(trump_vote_share>=.5, "Republican", "Democrat")))
-
-
-graph1 <- data.prepped %>% 
+graphs1 <- data %>% 
   group_by(county_fips) %>% 
-  mutate(baseline_sdlh = ifelse(week_start_date == as.Date("2020-01-27", "%Y-%m-%d"), 
-                                share_devices_leaving_home, NA),
-         baseline_mhdt = ifelse(week_start_date == as.Date("2020-01-27", "%Y-%m-%d"),
-                                median_home_dwell_time, NA)) %>% 
-  fill(baseline_sdlh, baseline_mhdt) %>% 
-  mutate(normalized_sdlh = share_devices_leaving_home / baseline_sdlh,
-         normalized_mhdt = median_home_dwell_time / baseline_mhdt) %>% 
+  
+  # Calculate baselines for dependent vars
+  mutate(baseline_ldlh = ifelse(week_start_date == as.Date("2020-01-27", "%Y-%m-%d"), 
+                                log_devices_leaving_home, NA),
+         baseline_lmhdt = ifelse(week_start_date == as.Date("2020-01-27", "%Y-%m-%d"),
+                                 log_median_home_dwell_time, NA)) %>% 
+  fill(baseline_ldlh, baseline_lmhdt) %>%
+  
+  # Calculate relative measure for future weeks
+  mutate(normalized_ldlh = log_devices_leaving_home / baseline_ldlh,
+         normalized_lmhdt = log_median_home_dwell_time / baseline_lmhdt) %>% 
   ungroup() %>% 
-  group_by(week_start_date, Party) %>% 
-  summarize(mean_sdlh = mean(normalized_sdlh, na.rm=TRUE),
-            mean_mhdt = mean(normalized_mhdt, na.rm=TRUE))
+  group_by(week_start_date, county_republican) %>% 
+  
+  # Calculate mean of relative measures by county partisanship
+  summarize(mean_ldlh = mean(normalized_ldlh, na.rm=TRUE),
+            mean_lmhdt = mean(normalized_lmhdt, na.rm=TRUE)) %>% 
+  mutate(county_republican = as.factor(county_republican))
 
+# Custom color palette for viz
 party.colors <- c("#1000f7", "#f20019")
 
-ggplot(graph1, aes(x=week_start_date, y=mean_sdlh, color=Party)) +
+# Plot weekly log of devices leaving home by week and county partisan lean
+ggplot(graphs1, aes(x=week_start_date, y=mean_ldlh, color=county_republican)) +
   geom_line() +
-  scale_color_manual(values=party.colors) +
+  scale_color_manual(values=party.colors, labels=c("Democrat", "Republican")) +
   theme_bw() +
   guides(color=guide_legend(title="County partisan lean")) +
   labs(x="Date",
-       y="Normalized share of devices leaving home",
+       y="Normalized log of devices leaving home",
        title="Democratic and Republican counties behave differently, even to the end of May",
-       subtitle="Normalized share of mobile devices leaving home by week and county partisan lean")
+       subtitle="Normalized log of mobile devices leaving home by week and county partisan lean")
   
 ```
 
+From this figure we see that the trends Allcott et al identified hold in this replication dataset as well: by mid-March, the number of devices leaving home areas in Democratic and Republican-leaning counties diverged sharply, and this difference persists even to the end of May.
+
+As another sanity check, we can make a similar plot using log median time at home dwelling as the dependent variable.
+
+### 3B. Log of median time spent at home
+
 ```{r}
-ggplot(graph1, aes(x=week_start_date, y=mean_mhdt, color=Party)) +
+ggplot(graphs1, aes(x=week_start_date, y=mean_lmhdt, color=county_republican)) +
   geom_line() +
-  scale_color_manual(values=party.colors) +
+  scale_color_manual(values=party.colors, labels=c("Democrat", "Republican")) +
   theme_bw() +
   guides(color=guide_legend(title="County partisan lean")) +
   labs(x="Date",
-       y="Normalized median home-dwelling time",
-       title="Residents of Democratic-leaning counties are likelier to spend more time at home",
-       subtitle="Normalized median homeo dwelling time by week and county partisan lean")
+       y="Normalized log median home-dwelling time",
+       title="Residents of Democratic-leaning counties spend more time at home",
+       subtitle="Normalized log median home dwelling time by week and county partisan lean")
 ```
+Again, we see that Democratic counties spent *more* time at home starting by mid-March, and this disparity again persists into the end of May. Of course, these visual checks use absolute dates without reference to variation in SIPO orders (or other types of variation).
 
+## 4. Regression model
+
+### 4A. Data prep
+
+To examine the impact of SIPOs, I create two new variables in the dataset: *weeks_since_start*, which measures the number of weeks since the beginning of a SIPO (with the week of the SIPO's enactment labeled 0), and *weeks_since_end*, which measures the number of weeks since the end of a SIPO. Counties where a SIPO was never in effect are dropped.
 
 ```{r}
-dates <- as.data.frame(table(data.prepped$week_start_date))
-coefs <- list()
-resids <- list()
-i <- 1
-for (date in dates$Var1) {
-  print(date)
-  subset <- data.prepped %>% filter(week_start_date == as.Date(date, "%Y-%m-%d"))
-  print(nrow(subset))
-  model <- plm(log_devices_leaving ~ trump_vote_share, 
-               data=subset, index="county_fips", model="within", effect="twoways")
-  coefs[[i]] <- model$coefficients[2]
-  resids[[i]] <- model$residuals[2]
-  i <- i + 1
-}
+# First, identify county_fips where there ever was a SIPO
+ever.sipo <- data %>% 
+  group_by(county_fips) %>% 
+  summarize(sipo_binary = max(weekly_sipo_binary, na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  filter(sipo_binary > 0)
 
-low <- c()
-high <- c()
-i <- 1
-for (date in dates$var1) {
-  subset <- data.prepped %>% filter(week_start_date == as.Date(date, "%Y-%m-%d"))
-  dem <- subset %>% filter(Party=="Democrat") %>% select(share_devices_leaving_home) %>% .[[1]]
-  rep <- subset %>% filter(Party=="Republican") %>% select(share_devices_leaving_home) %>% .[[1]]
-  t.obj <- t.test(dem, rep)
-  low[[i]] <- t.obj$conf.int[1]
-  high[[i]] <- t.obj$conf.int[2]
-  i <- i + 1
-}
-
-make.it <- function(date) {
-  subset <- data.prepped %>% filter(week_start_date==as.Date(date, "%Y-%m-%d"))
-  dem <- subset %>% filter(Party=="Democrat") %>% select(share_devices_leaving_home) %>% .[[1]]
-  rep <- subset %>% filter(Party=="Republican") %>% select(share_devices_leaving_home) %>% .[[1]]
-  t.obj <- t.test(dem, rep)
-  t.obj$conf.int
-}
-
-ints <- list()
-i <- 1
-for (date in dates$var1) {
-  print(date)
-  ints[[i]] <- make.it(date)
-  i <- i + 1
-}
-
-low <- c()
-high <- c()
-dem <- data.prepped %>% filter(week_start_date == as.Date(dates$Var1[18], "%Y-%m-%d")) %>% 
-  filter(Party=="Democrat") %>% select(share_devices_leaving_home) %>% .[[1]]
-rep <- data.prepped %>% filter(week_start_date == as.Date(dates$Var1[18], "%Y-%m-%d")) %>% 
-  filter(Party=="Republican") %>% select(share_devices_leaving_home) %>% .[[1]]
-low <- c(low, t.test(dem, rep)$conf.int[1])
-high <- c(high, t.test(dem, rep)$conf.int[2])
-
-cis <- cbind(dates, tibble(low, high)) %>% 
-  mutate(point = (low+high)/2)
-
-ggplot(cis) +
-  geom_pointrange(mapping=aes(x=Var1, y=point, ymin=low, ymax=high)) +
-  geom_point(mapping=aes(x=Var1, y=point), color="red", size=3) +
-  geom_hline(yintercept=0, linetype="dashed") +
-  ylim(-.08, .02) +
-  labs(x="Week", y="Estimated difference between counties by partisanship",
-       title="By-partisan mobility differences persist even to the end of May",
-       subtitle="Median share of devices leaving home by week, 1/27/20-5/25/20") +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle=90))
+# Generate new dataframe with the two weeks_since variables
+data.weeks.since <- data %>%
+  # Drop counties that never had a SIPO
+  filter(county_fips %in% ever.sipo$county_fips) %>% 
+  group_by(county_fips) %>% 
+  
+  # Generate weeks_since variables using the weekly_sipo_binary variable that signals whether there was a SIPO
+  # at any time in the county-week observation
+  mutate(sip_start_week_relative = ifelse(weekly_sipo_binary == 1 & dplyr::lag(weekly_sipo_binary) == 0, 0, NA),
+         sip_end_week_relative = ifelse(weekly_sipo_binary == 1 & dplyr::lead(weekly_sipo_binary) == 0, 0, NA),
+         weeknum = row_number(),
+         sip_start_week_sub = ifelse(sip_start_week_relative == 0, weeknum, NA),
+         sip_end_week_sub = ifelse(sip_end_week_relative == 0, weeknum, NA)) %>% 
+  fill(sip_start_week_sub, sip_end_week_sub) %>% 
+  fill(sip_start_week_sub, sip_end_week_sub, .direction="up") %>% 
+  ungroup() %>% 
+  mutate(weeks_since_start = as.factor(weeknum - sip_start_week_sub),
+         weeks_since_end = as.factor(weeknum - sip_end_week_sub)) %>% 
+  
+  # Clean up unnecessary vars
+  select(-c(sip_start_week_relative, sip_end_week_relative, weeknum, sip_start_week_sub, sip_end_week_sub))
 ```
+
+### 4B. Dependent variable: log_devices_leaving_home
+
+Now we can start with a simple regression model. Here we examine the difference in *log_devices_leaving_home* by county partisanship indexing time by weeks since the SIPO *start*. 
 
 ```{r}
-w9.dem <- data.prepped %>% 
-  filter(week_start_date == as.Date("2020-03-23", "%Y-%m-%d") & Party=="Democrat") %>% 
-  select(share_devices_leaving_home) %>% .[[1]]
+# Run regression
+ldlh.weeks.since.start <- plm(log_devices_leaving_home ~ trump_vote_share + weeks_since_start,
+                              data = data.weeks.since,
+                              index = c("county_fips", "weeks_since_start"),
+                              model = "within")
 
-w9.rep <- data.prepped %>% 
-  filter(week_start_date == as.Date("2020-03-23", "%Y-%m-%d") & Party=="Republican") %>% 
-  select(share_devices_leaving_home) %>% .[[1]]
-w9.t <- t.test(w9.dem, w9.rep)
+# Extract coefficients
+ldlh.weeks.since.start.coef <- tidy(coeftest(
+  ldlh.weeks.since.start, vcov=vcovHC(ldlh.weeks.since.start, type="sss", cluster="group"))) %>% 
+  mutate(significance = ' ',
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.95), '*', significance),
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.975), '**', significance),
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.995), '***', significance),
+         week = row_number() - 10)
 
+# Print coefficient estimates
+ldlh.weeks.since.start.coef %>% 
+  select(week, estimate, std.error, significance) %>% 
+  knitr::kable(.)
 
-
-test <- plm(log_devices_leaving ~ trump_vote_share,
-            data = subset, index=c("county_fips"), model="within", effect="twoways")
-
-
-app.a8.a1 <- lm(log_devices_leaving ~ trump_vote_share + week_factor - 1, 
-                data = data.prepped)
-stargazer(app.a8.a1, type="text")
-
-app.a8.a3 <- lm(log_median_home_dwell ~ trump_vote_share, 
-                data = data.prepped)
-stargazer(app.a8.a3, type="text")
-
-app.a8.a1.b <- plm(log_devices_leaving ~ trump_vote_share + week_factor - 1,
-                   data = data.prepped,
-                   index = c("county_fips", "week_factor"),
-                   model = "within",
-                   effect = "twoways")
+# Plot estimates and confidence intervals
+ldlh.weeks.since.start.coef %>% 
+  filter(week >= -5 & week <= 5) %>% 
+  ggplot(.) +
+  geom_pointrange(aes(x=week, y=estimate, ymin=estimate-2*std.error, ymax=estimate+2*std.error)) +
+  geom_point(aes(x=week, y=estimate), color="red", size=3) +
+  scale_x_continuous(name="Weeks since SIPO start", breaks=c(-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5)) +
+  geom_vline(xintercept=0, linetype="dotted", alpha=0.95) +
+  geom_hline(yintercept=0, linetype="dotted", alpha=0.95) +
+  scale_y_continuous(name="Difference in log devices leaving home") +
+  labs(title="Democratic counties are more mobile before SIPOs and less mobile afterwards",
+       subtitle="Percent difference in log devices leaving home by county partisan lean")  +
+  theme_bw()
 ```
+
+County partisanship is measured on a 0-1 scale where 0 is most Democratic and 1 is most Republican, so my understanding is that these estimates suggest that residents of Democrat counties were more mobile than their Republican counterparts before SIPOs went into effect (perhaps anticipating that SIPOs would soon be implemented), but adjusted their behavior and became *less* mobile even before SIPOs went into place, a finding that has been reported elsewhere in the literature *(citations to come)*. These estimates also suggest that residents of Democratic counties under SIPOs adhered more closely to them than did residents of Republican counties. A few notes/questions:
+
+- The estimates look to be very precise, which makes me wonder about how clustered standard errors should be specified.
+- I also know I need to think about controlling for time trends, because it looks like there are pretty big differences between county types even long before SIPOs were put in place.
+- **Any guidance on how to think about these two issues?**
+
+Now I repeat the analysis for time since SIPO *end*.
+
+```{r}
+# Run regression
+ldlh.weeks.since.end <- plm(log_devices_leaving_home ~ trump_vote_share + weeks_since_end,
+                         data = data.weeks.since,
+                         index = c("county_fips", "weeks_since_end"),
+                         model = "within")
+
+# Extract coefficients
+ldlh.weeks.since.end.coef <- tidy(coeftest(ldlh.weeks.since.end, vcov=vcovHC(ldlh.weeks.since.end, type="sss", cluster="group"))) %>% 
+  mutate(significance = ' ',
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.95), '*', significance),
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.975), '**', significance),
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.995), '***', significance),
+         week = row_number() - 16)
+
+# Print coefficient estimates
+ldlh.weeks.since.end.coef %>% 
+  select(week, estimate, std.error, significance) %>% 
+  knitr::kable(.)
+
+# Plot estimates and confidence intervals
+ldlh.weeks.since.end.coef %>% 
+  filter(week >= -5) %>% 
+  ggplot(.) +
+  geom_pointrange(aes(x=week, y=estimate, ymin=estimate-2*std.error, ymax=estimate+2*std.error)) +
+  geom_point(aes(x=week, y=estimate), color="red", size=3) +
+  scale_x_continuous(name="Weeks since SIPO end", breaks=c(-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5)) +
+  geom_vline(xintercept=0, linetype="dotted", alpha=0.95) +
+  geom_hline(yintercept=0, linetype="dotted", alpha=0.95) +
+  scale_y_continuous(name="Difference in log devices leaving home") +
+  labs(title="Partisan social distancing differences persist after SIPOs are lifted",
+       subtitle="Percent difference in log devices leaving home by county partisan lean") +
+  theme_bw()
+```
+
+These results look pretty much like what I expected. In the weeks leading up to a SIPO end, Democratic counties social distance more than Republican counties (i.e., residents in Democratic counties adhere more closely to the SIPO). Even in the week that the SIPO is lifted (week 0) and the few weeks after, Democratic counties social distance more - it's not until 3-4 weeks after a SIPO is lifted that the partisan difference in distancing fully attenuates. This is a pretty intriguing finding and I'll be interested to pursue it further, with more fully fleshed-out model specifications, and potentially exploring this trend at the state level.
+
+### 4C. Dependent variable: log median time spent at home
+
+I'll run through the same model with a different dependent variable, log median time spent at home by devices per county-week, as an initial robustness check.
+
+```{r}
+# Run regression
+mhdt.weeks.since.start <- plm(log_median_home_dwell_time ~ trump_vote_share + weeks_since_start,
+                              data = data.weeks.since,
+                              index = c("county_fips", "weeks_since_start"),
+                              model = "within")
+
+# Extract coefficients
+mhdt.weeks.since.start.coef <- tidy(coeftest(
+  mhdt.weeks.since.start, vcov=vcovHC(mhdt.weeks.since.start, type="sss", cluster="group"))) %>% 
+  mutate(significance = ' ',
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.95), '*', significance),
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.975), '**', significance),
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.995), '***', significance),
+         week = row_number() - 10)
+
+# Print coefficient estimates
+mhdt.weeks.since.start.coef %>% 
+  select(week, estimate, std.error, significance) %>% 
+  knitr::kable(.)
+
+# Plot estimates and confidence intervals
+mhdt.weeks.since.start.coef %>% 
+  filter(week >= -5 & week <= 5) %>% 
+  ggplot(.) +
+  geom_pointrange(aes(x=week, y=estimate, ymin=estimate-2*std.error, ymax=estimate+2*std.error)) +
+  geom_point(aes(x=week, y=estimate), color="red", size=3) +
+  scale_x_continuous(name="Weeks since SIPO start", breaks=c(-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5)) +
+  geom_vline(xintercept=0, linetype="dotted", alpha=0.95) +
+  geom_hline(yintercept=0, linetype="dotted", alpha=0.95) +
+  scale_y_continuous(name="Difference in log median time spent at home") +
+  labs(title="Democratic counties spend less time at home before SIPOs and less afterwards",
+       subtitle="Percent difference in log median time spent at home by county partisan lean")  +
+  theme_bw()
+```
+
+Roughly same findings and issues as the SIPO start analysis above - will need to think about clustering standard errors and controlling for time trends.
+
+```{r}
+# Run regression
+mhdt.weeks.since.end <- plm(log_median_home_dwell_time ~ trump_vote_share + weeks_since_end,
+                         data = data.weeks.since,
+                         index = c("county_fips", "weeks_since_end"),
+                         model = "within")
+
+# Extract coefficients
+mhdt.weeks.since.end.coef <- tidy(coeftest(
+  mhdt.weeks.since.end, vcov=vcovHC(mhdt.weeks.since.end, type="sss", cluster="group"))) %>% 
+  mutate(significance = ' ',
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.95), '*', significance),
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.975), '**', significance),
+         significance = ifelse(abs(estimate/std.error) >= qnorm(0.995), '***', significance),
+         week = row_number() - 16)
+
+# Print coefficient estimates
+mhdt.weeks.since.end.coef %>% 
+  select(week, estimate, std.error, significance) %>% 
+  knitr::kable(.)
+
+# Plot estimates and confidence intervals
+mhdt.weeks.since.end.coef %>% 
+  filter(week >= -5) %>% 
+  ggplot(.) +
+  geom_pointrange(aes(x=week, y=estimate, ymin=estimate-2*std.error, ymax=estimate+2*std.error)) +
+  geom_point(aes(x=week, y=estimate), color="red", size=3) +
+  scale_x_continuous(name="Weeks since SIPO end", breaks=c(-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5)) +
+  geom_vline(xintercept=0, linetype="dotted", alpha=0.95) +
+  geom_hline(yintercept=0, linetype="dotted", alpha=0.95) +
+  scale_y_continuous(name="Difference in log devices leaving home") +
+  labs(title="Partisan social distancing differences persist after SIPOs are lifted",
+       subtitle="Percent difference in log devices leaving home by county partisan lean") +
+  theme_bw()
+```
+
+Again, the data are telling a fairly consistent story - Democratic counties spend more time at home pre-SIPO end and relatively less afterwards. It's also heartening in a way that these analyses face some of the same issues surrounding clustered SEs and time trends, because it suggests that once these issues are addressed there will be some clearer conclusions.
+
+## 5. Next steps and questions
+
+The questions I need help with are:
+
+1. **How to control for time trends in the event study analysis?**
+2. **How to think about clustering standard errors, and whether it's an issue that some of my estimates have extremely high precision?**
+3. Allcott et al report panel results with *just* county-time fixed effects, and *also* state-time fixed effects. **How can I think about composing these two types of fixed effects together? Is there any sample code I could take a look at to address this?**
+
+The steps I'll take for next Friday are:
+
+- Finish POI data build and run models with POI visits as dependent variable, including additional analysis by NAICS code
+- Add controls for policies, public health, weather and demographics
+- Incorporate feedback, especially as pertains to the questions above
+- Organize paper more traditionally (abstract, introduction, lit review, data & methods, results, conclusion, appendices)
