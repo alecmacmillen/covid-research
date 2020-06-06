@@ -2,6 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
+covid-research.Rproj
 
 ### Data to ignore
 data/raw/*
