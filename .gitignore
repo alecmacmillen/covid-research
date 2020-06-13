@@ -8,4 +8,5 @@ covid-research.Rproj
 data/raw/*
 data/interim/*
 data/external/*
+data/processed/*
 data/processed/allcott/social-distancing/superseded/*

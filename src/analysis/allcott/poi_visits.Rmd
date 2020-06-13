@@ -1,0 +1,665 @@
+---
+title: "Divergent Partisan Trends in Mobility around Shelter-in-Place Orders"
+author: "Alec MacMillen"
+date: "6/10/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+library(stargazer)
+library(lubridate)
+library(plm)
+library(lmtest)
+library(broom)
+library(multiwayvcov)
+library(fixest)
+library(clubSandwich)
+library(tidyverse)
+library(stargazer)
+library(here)
+library(tidylog)
+library(caret)
+library(choroplethr)
+library(choroplethrMaps)
+library(gridExtra)
+
+weeks <- c(as_date("2020-01-27"), as_date("2020-02-03"), as_date("2020-02-10"), 
+           as_date("2020-02-17"), as_date("2020-02-24"), as_date("2020-03-02"), 
+           as_date("2020-03-09"), as_date("2020-03-16"), as_date("2020-03-23"), 
+           as_date("2020-03-30"), as_date("2020-04-06"), as_date("2020-04-13"), 
+           as_date("2020-04-20"), as_date("2020-04-27"), as_date("2020-05-04"),
+           as_date("2020-05-11"), as_date("2020-05-18"), as_date("2020-05-25"))
+
+weeklabels <- c("Jan 27", "Feb 3", "Feb 10", "Feb 17", "Feb 24", "Mar 2", "Mar 9", 
+                "Mar 16", "Mar 23", "Mar 30", "Apr 6", "Apr 13", "Apr 20", "Apr 27",
+                "May 4", "May 11", "May 18", "May 25")
+
+party.colors <- c("#1000f7", "#f20019")
+```
+
+# First task: replicate Allcott POI regressions
+# Panel A: county and time FE only
+
+```{r}
+data <- read_csv(here::here("data/processed/allcott/allcott_full_build.csv.gz"))
+data.clean <- data %>% 
+  filter(!(is.na(county_fips)) & !(is.na(week_start_date))) %>% 
+  select(county_fips, week_start_date, everything())
+
+r.90.10.diff <- as.numeric(
+  quantile(data.clean$trump_vote_share, prob = 0.9) - quantile(data.clean$trump_vote_share, prob = 0.1))
+```
+```{r}
+med_trump <- median(data.clean$trump_vote_share)
+
+charts1 <- data.clean %>% 
+  mutate(republican = as.factor(ifelse(trump_vote_share > med_trump, 1, 0))) %>% 
+  group_by(republican, week_start_date) %>% 
+  summarize(mean_poi = mean(total_visits, na.rm=TRUE),
+            mean_tvdc = mean(total_visitors_diff_cbg, na.rm=TRUE),
+            mean_dlh = mean(devices_leaving_home, na.rm=TRUE),
+            mean_nhdt = mean(median_non_home_dwell_time, na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  mutate(baseline_poi = ifelse(week_start_date == as_date("2020-01-27"), mean_poi, NA),
+         baseline_tvdc = ifelse(week_start_date == as_date("2020-01-27"), mean_tvdc, NA),
+         baseline_dlh = ifelse(week_start_date == as_date("2020-01-27"), mean_dlh, NA),
+         baseline_nhdt = ifelse(week_start_date == as_date("2020-01-27"), mean_nhdt, NA)) %>% 
+  fill(baseline_poi, baseline_tvdc, baseline_dlh, baseline_nhdt) %>% 
+  mutate(adj_mean_poi = mean_poi / baseline_poi,
+         adj_mean_tvdc = mean_tvdc / baseline_tvdc,
+         adj_mean_dlh = mean_dlh / baseline_dlh,
+         adj_mean_nhdt = mean_nhdt / baseline_nhdt)
+
+ggplot(charts1) +
+  geom_line(aes(x=week_start_date, y=adj_mean_poi, color=republican)) +
+  scale_color_manual(values=party.colors, labels=c("Democrat", "Republican")) +
+  scale_x_date(breaks=weeks, labels=weeklabels, name="Week") +
+  scale_y_continuous(name="Normalized POI visits", limits=c(0.3,1)) +
+  guides(color=guide_legend(title="County partisan lean")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.caption = element_text(hjust=0, face="italic"))
+
+ggplot(charts1) +
+  geom_line(aes(x=week_start_date, y=adj_mean_tvdc, color=republican)) +
+  scale_color_manual(values=party.colors, labels=c("Democrat", "Republican")) +
+  scale_x_date(breaks=weeks, labels=weeklabels, name="Week") +
+  scale_y_continuous(name="Normalized visitors from different block groups") +
+  guides(color=guide_legend(title="County partisan lean")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.caption = element_text(hjust=0, face="italic"))
+
+ggplot(charts1) +
+  geom_line(aes(x=week_start_date, y=adj_mean_nhdt, color=republican)) +
+  scale_color_manual(values=party.colors, labels=c("Democrat", "Republican")) +
+  scale_x_date(breaks=weeks, labels=weeklabels, name="Week") +
+  scale_y_continuous(name="Normalized time spent outside the home") +
+  guides(color=guide_legend(title="County partisan lean")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.caption = element_text(hjust=0, face="italic"))
+```
+```{r}
+charts2 <- data.clean %>% 
+  mutate(republican = as.factor(ifelse(trump_vote_share > med_trump, 1, 0)),
+         cases = exp(log_cases)-1,
+         deaths = exp(log_deaths)-1) %>% 
+  group_by(republican, week_start_date) %>% 
+  summarize(total_cases = sum(cases, na.rm=TRUE),
+            total_deaths = sum(deaths, na.rm=TRUE)) %>% 
+  gather(key="measure", value="count", total_cases, total_deaths) %>% 
+  ungroup()
+
+ggplot(charts2) +
+  geom_line(aes(x=week_start_date, y=count, color=republican, linetype=measure)) +
+  scale_x_date(breaks=weeks, labels=weeklabels, name="Week") +
+  scale_y_continuous(label=scales::comma, name="Count") +
+  scale_color_manual(values=party.colors, labels=c("Democrat", "Republican"), name="Partisan lean") +
+  scale_linetype_manual(values=c("solid","dashed"), labels=c("Cases", "Deaths"), name="Outcome") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.caption = element_text(hjust=0, face="italic"))
+```
+
+### ANALYSIS ON FULL DATA
+
+```{r}
+# DON'T NEED TO PRESENT THIS!!! THIS IS JUST BASIC ABSOLUTE DATE ALLCOTT REPLICATION
+#m1 <- plm(log_total_visits ~ trump_vote_share + week_start_date,
+#          data = data.clean,
+#          index = c("county_fips", "week_start_date"),
+#          model = "within")
+
+#test <- clubSandwich::vcovCR(m1, cluster = data.clean$state, type = "CR2")
+
+#m1.coefs <- tidy(coeftest(
+#  m1, vcov=vcovHC(m1, type="sss", cluster="group"))) %>% 
+#  tibble::add_row(., term="week_start_date2020-01-27", 
+#                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+#  mutate(percent_difference = -1 * estimate * r.90.10.diff,
+#         low = percent_difference - 2*std.error,
+#         high = percent_difference + 2*std.error)
+#
+#ggplot(m1.coefs) +
+#  geom_hline(yintercept=0, linetype="dashed") +
+#  geom_errorbar(aes(x=term, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+#  geom_point(aes(x=term, y=percent_difference), size=2.5, color="red") +
+#  coord_cartesian(ylim=c(-.2, 1.2)) +
+#  scale_y_continuous(name="Partisan difference") +
+#  scale_x_discrete(name="Week",
+#                   labels=c("Jan 27", "Feb 3", "Feb 10", "Feb 17", "Feb 24",
+#                            "Mar 3", "Mar 10", "Mar 17", "Mar 24", "Mar 31",
+#                            "Apr 7", "Apr 14", "Apr 21", "Apr 28",
+#                            "May 5", "May 12", "May 19", "May 26")) +
+#  theme_bw() +
+#  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# Generate new dataframe with the two weeks_since variables
+weeks.since <- data.clean %>%
+  group_by(county_fips) %>% 
+  
+  # Generate weeks_since variables using the weekly_sipo_binary variable that signals whether there was a SIPO
+  # at any time in the county-week observation
+  mutate(sip_start_week_relative = ifelse(weekly_sipo_binary == 1 & dplyr::lag(weekly_sipo_binary) == 0, 0, NA),
+         sip_end_week_relative = ifelse(weekly_sipo_binary == 1 & dplyr::lead(weekly_sipo_binary) == 0, 0, NA),
+         weeknum = row_number(),
+         sip_start_week_sub = ifelse(sip_start_week_relative == 0, weeknum, NA),
+         sip_end_week_sub = ifelse(sip_end_week_relative == 0, weeknum, NA)) %>% 
+  fill(sip_start_week_sub, sip_end_week_sub) %>% 
+  fill(sip_start_week_sub, sip_end_week_sub, .direction="up") %>% 
+  ungroup() %>% 
+  mutate(weeks_since_start = as.factor(weeknum - sip_start_week_sub),
+         weeks_since_end = as.factor(weeknum - sip_end_week_sub)) %>% 
+  
+  # Clean up unnecessary vars
+  select(-c(sip_start_week_relative, sip_end_week_relative, weeknum, sip_start_week_sub, sip_end_week_sub))
+
+
+# MODEL 1: SIMPLE REGRESSION
+m1.ws <- plm(log_total_visits ~ trump_vote_share + weeks_since_start,
+             data = weeks.since,
+             index = c("county_fips", "weeks_since_start"),
+             model = "within")
+
+m1.ws.coefs <- tidy(coeftest(
+  m1.ws, vcov=vcovHC(m1.ws, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_start-10", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+# m1.ws.coefs.plot <- 
+#m1.ws.coefs %>% 
+#  filter(row_number() <= 15) %>% 
+#  ggplot(.) +
+#  geom_hline(yintercept=0, linetype="dashed") +
+#  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+#  geom_point(aes(x=weekorder, y=percent_difference), size=2.5, color="red") +
+#  coord_cartesian(ylim=c(-.1, .9)) +
+#  scale_y_continuous(name="Partisan difference") +
+#  scale_x_discrete(name="Weeks since SIPO effective date",
+#                   labels=c("-10", "-9", "-8", "-7", "-6", "-5", "-4", "-3", "-2", "-1",
+#                            "0", "1", "2", "3", "4")) +
+#  theme_bw() +
+#  labs(title="Percentage difference in POI visits by county partisanship",
+#       subtitle="By week since SIPO effective start date")
+```
+
+
+```{r}
+weeks.since.controls <- weeks.since %>% 
+  group_by(week_start_date) %>% 
+  mutate(cases_decile = as.factor(ntile(log_cases,10)),
+         deaths_decile = as.factor(ntile(log_deaths, 10))) %>% 
+  ungroup() %>% 
+  group_by(county_fips) %>% 
+  mutate(lag1 = dplyr::lag(log_total_visits, n=1L),
+         lag2 = dplyr::lag(log_total_visits, n=2L),
+         lag3 = dplyr::lag(log_total_visits, n=3L),
+         lead1 = dplyr::lead(log_total_visits, n=1L),
+         lead2 = dplyr::lead(log_total_visits, n=2L),
+         lead3 = dplyr::lead(log_total_visits, n=3L)) %>% 
+  ungroup()
+
+for (var in c("cases_decile", "deaths_decile")) {
+  for (i in 1:10) {
+    varname <- paste0(var, "_", i)
+    weeks.since.controls[[varname]] <- ifelse(weeks.since.controls[[var]] == i, 1, 0)
+  }
+}
+
+weeks.since.controls.analysis <- weeks.since.controls %>% 
+  select(county_fips, weeks_since_start, weeks_since_end, log_total_visits, trump_vote_share, 
+         share_asian:mean_tmax, weekly_sipo_binary:log_pop_density, lag1:deaths_decile_10)
+n <- names(weeks.since.controls.analysis)
+```
+
+
+```{r}
+# MODEL 2: CONTROLS
+m1.ws.c <- plm(as.formula(paste("log_total_visits ~", 
+                                paste(n[!n %in% c("log_total_visits", "county_fips", "weeks_since_end", 
+                                                  "lag1", "lag2", "lag3", "lead1", "lead2", "lead3")], 
+                                      collapse = " + "))),
+                data = weeks.since.controls.analysis,
+                index = c("county_fips", "weeks_since_start"),
+                model = "within")
+
+m1.ws.c.coefs <- tidy(coeftest(
+  m1.ws.c, vcov=vcovHC(m1.ws.c, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_start-10", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+# m1.ws.c.coefs.plot <- 
+#m1.ws.c.coefs %>% 
+#  filter(row_number() <= 15) %>% 
+#  ggplot(.) +
+#  geom_hline(yintercept=0, linetype="dashed") +
+#  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+#  geom_point(aes(x=weekorder, y=percent_difference), size=2.5, color="red") +
+#  coord_cartesian(ylim=c(-.1, .6)) +
+#  scale_y_continuous(name="Partisan difference") +
+#  scale_x_discrete(name="Weeks since SIPO effective start date",
+#                   labels=c("-10", "-9", "-8", "-7", "-6", "-5", "-4", "-3", "-2", "-1", 
+#                            "0", "1", "2", "3", "4")) +
+#  theme_bw() +
+#  labs(title="Percentage difference in POI visits by county partisanship",
+#       subtitle="By week since SIPO effective start date. Includes health/policy/demographic controls.")
+```
+
+
+
+```{r}
+# MODEL 3: CONTROLS + TIME TRENDS
+m1.ws.ctt <- plm(as.formula(paste("log_total_visits ~", 
+                                paste(n[!n %in% c("log_total_visits", "county_fips", "weeks_since_end", "lag3", "lead3")], 
+                                      collapse = " + "))),
+               data = weeks.since.controls.analysis,
+               index = c("county_fips", "weeks_since_start"),
+               model = "within")
+
+m1.ws.ctt.coefs <- tidy(coeftest(
+  m1.ws.ctt, vcov=vcovHC(m1.ws.ctt, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_start-8", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+# m1.ws.c.coefs.plot <- 
+#m1.ws.ctt.coefs %>% 
+#  filter(row_number() <= 13) %>% 
+#  ggplot(.) +
+#  geom_hline(yintercept=0, linetype="dashed") +
+#  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+#  geom_point(aes(x=weekorder, y=percent_difference), size=2.5, color="red") +
+#  coord_cartesian(ylim=c(-.1, .2)) +
+#  scale_y_continuous(name="Partisan difference") +
+#  scale_x_discrete(name="Weeks since SIPO effective start date",
+#                   labels=c("-8", "-7", "-6", "-5", "-4", "-3", "-2", "-1", 
+#                            "0", "1", "2", "3", "4")) +
+#  theme_bw() +
+#  labs(title="Percentage difference in POI visits by county partisanship",
+#       subtitle="By week since SIPO effective start datedate. Includes controls for time trend, health, policy, demographics.")
+```
+
+```{r}
+# Combine all 3 models into one plot
+m1.ws.estimates <- m1.ws.coefs %>% filter(row_number() >= 3 & row_number() <= 15) %>% mutate(model = 1)
+m1.ws.c.estimates <- m1.ws.c.coefs %>% filter(row_number() >= 3 & row_number() <= 15) %>% mutate(model = 2)
+m1.ws.ctt.estimates <- m1.ws.ctt.coefs %>% filter(row_number() <= 13) %>% mutate(model = 3)
+all.ws.estimates <- rbind(m1.ws.estimates, m1.ws.c.estimates, m1.ws.ctt.estimates) %>% 
+  mutate(model = as.factor(model)) %>% 
+  group_by(model) %>% 
+  mutate(weekorder = row_number() - 9,
+         weekorder_fac = as.factor(weekorder)) %>% 
+  ungroup()
+
+model.colors <- c("#158E01", "#F0731A", "#0CB8E1")
+
+ggplot(all.ws.estimates) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_vline(xintercept=0, linetype="dashed") +
+  scale_y_continuous(name="Partisan difference") +
+  scale_x_continuous(name="Weeks since SIPO effective start date",
+                     breaks=c(-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4),
+                     labels=c("-8", "-7", "-6", "-5", "-4", "-3", "-2", "-1", 
+                              "0", "1", "2", "3", "4")) +
+  scale_color_manual(name="Model",
+                     values=model.colors, 
+                     labels=c("County-week FE", "County controls", "Time trends")) +
+  geom_point(aes(x=weekorder, y=percent_difference, color=model), size=2.5) +
+  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high, color=model), width=0.15, size=1.15) +
+  geom_line(aes(x=weekorder, y=percent_difference, color=model), linetype="dotted", size=0.5) +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+
+
+### WEEKS SINCE SIPO END DATE
+
+```{r}
+# MODEL 1: SIMPLE REGRESSION
+m1.we <- plm(log_total_visits ~ trump_vote_share + weeks_since_end,
+             data = weeks.since,
+             index = c("county_fips", "weeks_since_end"),
+             model = "within")
+
+m1.we.coefs <- tidy(coeftest(
+  m1.we, vcov=vcovHC(m1.we, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_end-16", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+# m1.we.coefs.plot <- 
+#m1.we.coefs %>% 
+#  filter(row_number() == 1 | (row_number() >= 13 & row_number() <= 20)) %>% 
+#  ggplot(.) +
+#  geom_hline(yintercept=0, linetype="dashed") +
+#  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+#  geom_point(aes(x=weekorder, y=percent_difference), size=2.5, color="red") +
+#  coord_cartesian(ylim=c(-.1, 1)) +
+#  scale_y_continuous(name="Partisan difference") +
+#  scale_x_discrete(name="Weeks since SIPO effective end date",
+#                   labels=c("baseline", "-4", "-3", "-2", "-1", "0", "1", "2", "3", "4", "5")) +
+#  theme_bw() +
+#  labs(title="Percentage difference in POI visits by county partisanship",
+#       subtitle="By week since SIPO effective end date")
+```
+
+```{r}
+# MODEL 2: CONTROLS
+m1.we.c <- plm(as.formula(paste("log_total_visits ~", 
+                                paste(n[!n %in% c("log_total_visits", "county_fips", "weeks_since_start", 
+                                                  "lag1", "lag2", "lag3", "lead1", "lead2", "lead3")], 
+                                      collapse = " + "))),
+                data = weeks.since.controls.analysis,
+                index = c("county_fips", "weeks_since_end"),
+                model = "within")
+
+m1.we.c.coefs <- tidy(coeftest(
+  m1.we.c, vcov=vcovHC(m1.we.c, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_end-16", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+
+#m1.we.c.coefs %>% 
+#  filter(row_number() == 1 | (row_number() >= 13 & row_number() <= 20)) %>% 
+#  ggplot(.) +
+#  geom_hline(yintercept=0, linetype="dashed") +
+#  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+#  geom_point(aes(x=weekorder, y=percent_difference), size=2.5, color="red") +
+#  #coord_cartesian(ylim=c(-.1, .3)) +
+#  scale_y_continuous(name="Partisan difference") +
+#  scale_x_discrete(name="Weeks since SIPO effective end date",
+#                   labels=c("baseline", "-4", "-3", "-2", "-1", "0", "1", "2", "3")) +
+#  theme_bw() +
+#  labs(title="Percentage difference in POI visits by county partisanship",
+#       subtitle="By week since SIPO effective end date, including health/policy/demographic controls")
+```
+
+
+
+```{r}
+# MODEL 3: CONTROLS + TIME TREND
+m1.we.ctt <- plm(as.formula(paste("log_total_visits ~", 
+                                paste(n[!n %in% c("log_total_visits", "county_fips", "weeks_since_start", "lag3", "lead3")], 
+                                      collapse = " + "))),
+               data = weeks.since.controls.analysis,
+               index = c("county_fips", "weeks_since_end"),
+               model = "within")
+
+m1.we.ctt.coefs <- tidy(coeftest(
+  m1.we.ctt, vcov=vcovHC(m1.we.ctt, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_end-14", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+# m1.we.ctt.coefs.plot <- 
+#m1.we.ctt.coefs %>% 
+#  filter(row_number() == 1 | (row_number() >= 11 & row_number() <= 18)) %>% 
+#  ggplot(.) +
+#  geom_hline(yintercept=0, linetype="dashed") +
+#  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+#  geom_point(aes(x=weekorder, y=percent_difference), size=2.5, color="red") +
+#  coord_cartesian(ylim=c(-.1, .3)) +
+#  scale_y_continuous(name="Partisan difference") +
+#  scale_x_discrete(name="Weeks since SIPO effective end date",
+#                   labels=c("baseline", "-4", "-3", "-2", "-1", "0", "1", "2", "3")) +
+#  theme_bw() +
+#  labs(title="Percentage difference in POI visits by county partisanship",
+#       subtitle="By week since SIPO effective end date Includes controls for time trend, health, policy, demographics.")
+```
+
+```{r}
+# Combine all three weeks-since-end models into one plot
+# Combine all 3 models into one plot
+m1.we.estimates <- m1.we.coefs %>% 
+  filter((row_number() >= 13 & row_number() <= 20)) %>% 
+  mutate(model = 1)
+m1.we.c.estimates <- m1.we.c.coefs %>% 
+  filter((row_number() >= 13 & row_number() <= 20)) %>% 
+  mutate(model = 2)
+m1.we.ctt.estimates <- m1.we.ctt.coefs %>% 
+  filter((row_number() <= 18 & row_number() >= 11)) %>% 
+  mutate(model = 3)
+all.we.estimates <- rbind(m1.we.estimates, m1.we.c.estimates, m1.we.ctt.estimates) %>% 
+  mutate(model = as.factor(model)) %>% 
+  group_by(model) %>% 
+  mutate(weekorder = row_number(),
+         weekorder_fac = as.factor(weekorder)) %>% 
+  ungroup()
+
+ggplot(all.we.estimates) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_vline(xintercept=5, linetype="dashed") +
+  scale_y_continuous(name="Partisan difference") +
+  scale_x_continuous(name="Weeks since SIPO effective end date",
+                     breaks=c(1, 2, 3, 4, 5, 6, 7, 8),
+                     labels=c("-4", "-3", "-2", "-1", "0", "1", "2", "3")) +
+  scale_color_manual(name="Model",
+                     values=model.colors, 
+                     labels=c("County-week FE", "County controls", "Time trends")) +
+  geom_point(aes(x=weekorder, y=percent_difference, color=model), size=2.5) +
+  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high, color=model), width=0.15, size=1.15) +
+  geom_line(aes(x=weekorder, y=percent_difference, color=model), linetype="dotted", size=0.5) +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+```{r}
+decile.colors <- c("#ffffff", "#f0f0f0", "#d9d9d9", "#bdbdbd",
+                   "#969696", "#737373", "#525252", "#252525",
+                   "#000000", "#000000")
+
+# Base map for OH county map of trump vote share
+oh <- weeks.since %>% filter(state == "ohio")
+oh.votes <- oh %>% 
+  distinct(county_fips, trump_vote_share) %>% 
+  rename(region = county_fips, value = trump_vote_share) %>% 
+  mutate(region = as.numeric(region)) %>% 
+  county_choropleth(., state_zoom = "ohio", num_colors = 1) +
+  scale_fill_gradient(high="red", low="blue", na.value="grey90",
+                      label=scales::percent, guide=FALSE,
+                      breaks=c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9))
+
+ggsave(paste0(here::here("../Manuscript/Figs"), "/oh_votes.png"), plot=oh.votes,
+       width=1.75, height=1.75, dpi=150, units="in", device="png")
+
+
+# Weekly choro maps of county POI visits relative to baseline
+oh.since <- weeks.since.controls %>% 
+  #filter(state == "ohio") %>% 
+  filter(!is.na(weeks_since_start)) %>% 
+  select(county_fips, total_visits, weeks_since_start) %>% 
+  arrange(county_fips, weeks_since_start) %>% 
+  group_by(county_fips) %>% 
+  mutate(baseline_visits = ifelse(weeks_since_start == -8, total_visits, NA)) %>% 
+  fill(baseline_visits) %>% 
+  ungroup() %>% 
+  mutate(adj_visits = total_visits / baseline_visits,
+         decile = ntile(adj_visits, 10))
+
+oh.ws.map <- function(wss) {
+  if (wss < -1) {
+    title <- paste0(wss*-1, " weeks pre-SIPO")
+  } else if (wss == -1) {
+    title <- "1 week pre-SIPO"
+  }
+    else if (wss == 0) {
+    title <- "Week of SIPO"
+  } else if (wss == 1) {
+    title <- "1 week post-SIPO"
+  } else {
+    title <- paste0(wss, " weeks post-SIPO")
+  }
+  
+  return.map <- oh.since %>% 
+    filter(weeks_since_start == wss) %>% 
+    distinct(county_fips, decile) %>% 
+    rename(region = county_fips, value = decile) %>% 
+    mutate(region = as.numeric(region)) %>% 
+    county_choropleth(., state_zoom = "ohio", num_colors = 9) +
+    scale_fill_manual(values=decile.colors, guide=FALSE) #+
+    #scale_fill_brewer(palette=6, name="Quintile", labels = c("1", "2", "3", "4", "5")) +
+    #ggtitle(title) +
+    #theme(plot.title = element_text(hjust=0.5))
+  
+  ggsave(paste0(here::here("../Manuscript/Figs"), "/oh", wss, ".png"), 
+         width=1.75, height=1.75, dpi=150, units="in", device="png")
+    
+  return.map
+}
+
+
+oh.ws_7 <- oh.ws.map(-7)
+oh.ws_6 <- oh.ws.map(-6)
+oh.ws_5 <- oh.ws.map(-5)
+oh.ws_4 <- oh.ws.map(-4)
+oh.ws_3 <- oh.ws.map(-3)
+oh.ws_2 <- oh.ws.map(-2)
+oh.ws_1 <- oh.ws.map(-1)
+oh.ws0 <- oh.ws.map(0)
+oh.ws1 <- oh.ws.map(1)
+oh.ws2 <- oh.ws.map(2)
+oh.ws3 <- oh.ws.map(3)
+oh.ws4 <- oh.ws.map(4)
+
+```
+
+```{r}
+# Base map for OH county map of trump vote share
+sc <- weeks.since %>% filter(state == "south carolina")
+sc.votes <- sc %>% 
+  distinct(county_fips, trump_vote_share) %>% 
+  rename(region = county_fips, value = trump_vote_share) %>% 
+  mutate(region = as.numeric(region)) %>% 
+  county_choropleth(., state_zoom = "south carolina", num_colors = 1) +
+  scale_fill_gradient(high="red", low="blue", na.value="grey90",
+                      label=scales::percent, guide=FALSE,
+                      breaks=c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9))
+
+ggsave(paste0(here::here("../Manuscript/Figs"), "/sc_votes.png"), plot=sc.votes,
+       width=1.75, height=1.75, dpi=150, units="in", device="png")
+
+
+# Weekly choro maps of county POI visits relative to baseline
+sc.since <- weeks.since.controls %>% 
+  #filter(state == "south carolina") %>% 
+  select(county_fips, total_visits, weeks_since_end) %>% 
+  arrange(county_fips, weeks_since_end) %>% 
+  group_by(county_fips) %>% 
+  mutate(baseline_visits = ifelse(weeks_since_end == -13, total_visits, NA)) %>% 
+  fill(baseline_visits) %>% 
+  ungroup() %>% 
+  mutate(adj_visits = total_visits / baseline_visits,
+         decile = ntile(adj_visits, 10))
+
+sc.ws.map <- function(wss) {
+  if (wss < -1) {
+    title <- paste0(wss*-1, " weeks pre-SIPO")
+  } else if (wss == -1) {
+    title <- "1 week pre-SIPO"
+  }
+    else if (wss == 0) {
+    title <- "Week of SIPO"
+  } else if (wss == 1) {
+    title <- "1 week post-SIPO"
+  } else {
+    title <- paste0(wss, " weeks post-SIPO")
+  }
+  
+  return.map <- sc.since %>% 
+    filter(weeks_since_end == wss) %>% 
+    distinct(county_fips, decile) %>% 
+    rename(region = county_fips, value = decile) %>% 
+    mutate(region = as.numeric(region)) %>% 
+    county_choropleth(., state_zoom = "south carolina", num_colors = 5) +
+    scale_fill_manual(values=decile.colors, guide=FALSE) #+
+    #scale_fill_brewer(palette=6, name="Quintile", labels = c("1", "2", "3", "4", "5")) +
+    #ggtitle(title) +
+    #theme(plot.title = element_text(hjust=0.5))
+  
+  ggsave(paste0(here::here("../Manuscript/Figs"), "/sc", wss, ".png"), 
+         width=1.75, height=1.75, dpi=150, units="in", device="png")
+    
+  return.map
+}
+
+sc.ws_7 <- sc.ws.map(-7)
+sc.ws_6 <- sc.ws.map(-6)
+sc.ws_5 <- sc.ws.map(-5)
+sc.ws_4 <- sc.ws.map(-4)
+sc.ws_3 <- sc.ws.map(-3)
+sc.ws_2 <- sc.ws.map(-2)
+sc.ws_1 <- sc.ws.map(-1)
+sc.ws0 <- sc.ws.map(0)
+sc.ws1 <- sc.ws.map(1)
+sc.ws2 <- sc.ws.map(2)
+sc.ws3 <- sc.ws.map(3)
+sc.ws4 <- sc.ws.map(4)
+
+```
+
+
+
+
+
+
+
+
+```{r}
+sipos <- read_csv(here::here("data/interim/responses/daily_sipo_timeseries.csv.gz"),
+                  col_types = cols(county_sip_start_date = col_date(),
+                                   county_sip_end_date = col_date()))
+
+state <- sipos %>% filter(state == "south carolina") %>% 
+  distinct(county_fips, state_sip_start_date, state_sip_end_date, county_sip_start_date, county_sip_end_date)
+```
+
+
+
+

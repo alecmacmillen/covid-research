@@ -1,0 +1,326 @@
+---
+title: "Divergent Partisan Trends in Mobility around Shelter-in-Place Orders"
+author: "Alec MacMillen"
+date: "6/10/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+library(stargazer)
+library(lubridate)
+library(plm)
+library(lmtest)
+library(broom)
+library(multiwayvcov)
+library(fixest)
+library(clubSandwich)
+library(tidyverse)
+library(stargazer)
+library(here)
+library(tidylog)
+library(caret)
+
+weeks <- c(as_date("2020-01-27"), as_date("2020-02-03"), as_date("2020-02-10"), 
+           as_date("2020-02-17"), as_date("2020-02-24"), as_date("2020-03-02"), 
+           as_date("2020-03-09"), as_date("2020-03-16"), as_date("2020-03-23"), 
+           as_date("2020-03-30"), as_date("2020-04-06"), as_date("2020-04-13"), 
+           as_date("2020-04-20"), as_date("2020-04-27"), as_date("2020-05-04"),
+           as_date("2020-05-11"), as_date("2020-05-18"), as_date("2020-05-25"))
+
+weeklabels <- c("Jan 27", "Feb 3", "Feb 10", "Feb 17", "Feb 24", "Mar 2", "Mar 9", 
+                "Mar 16", "Mar 23", "Mar 30", "Apr 6", "Apr 13", "Apr 20", "Apr 27",
+                "May 4", "May 11", "May 18", "May 25")
+
+party.colors <- c("#1000f7", "#f20019")
+```
+
+# First task: replicate Allcott POI regressions
+# Panel A: county and time FE only
+
+```{r}
+data <- read_csv(here::here("data/processed/allcott/allcott_full_build.csv.gz"))
+data.clean <- data %>% 
+  filter(!(is.na(county_fips)) & !(is.na(week_start_date))) %>% 
+  select(county_fips, week_start_date, everything())
+
+r.90.10.diff <- as.numeric(
+  quantile(data.clean$trump_vote_share, prob = 0.9) - quantile(data.clean$trump_vote_share, prob = 0.1))
+```
+```{r}
+illinois <- data.clean %>% filter(state=="illinois")
+med_trump_il <- median(illinois$trump_vote_share)
+
+il.charts1 <- illinois %>% 
+  mutate(republican = as.factor(ifelse(trump_vote_share > med_trump_il, 1, 0))) %>% 
+  group_by(republican, week_start_date) %>% 
+  summarize(mean_poi = mean(total_visits, na.rm=TRUE),
+            mean_svdc = mean(share_visitors_diff_cbg, na.rm=TRUE),
+            mean_dlh = mean(devices_leaving_home, na.rm=TRUE),
+            mean_nhdt = mean(median_non_home_dwell_time, na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  mutate(baseline_poi = ifelse(week_start_date == as_date("2020-01-27"), mean_poi, NA),
+         baseline_svdc = ifelse(week_start_date == as_date("2020-01-27"), mean_svdc, NA),
+         baseline_dlh = ifelse(week_start_date == as_date("2020-01-27"), mean_dlh, NA),
+         baseline_nhdt = ifelse(week_start_date == as_date("2020-01-27"), mean_nhdt, NA)) %>% 
+  fill(baseline_poi, baseline_svdc, baseline_dlh, baseline_nhdt) %>% 
+  mutate(adj_mean_poi = mean_poi / baseline_poi,
+         adj_mean_svdc = mean_svdc / baseline_svdc,
+         adj_mean_dlh = mean_dlh / baseline_dlh,
+         adj_mean_nhdt = mean_nhdt / baseline_nhdt)
+
+ggplot(il.charts1) +
+  geom_line(aes(x=week_start_date, y=adj_mean_poi, color=republican)) +
+  geom_vline(xintercept=as_date("2020-03-20"), linetype="dashed") +
+  geom_vline(xintercept=as_date("2020-05-29"), linetype="dashed") +
+  scale_color_manual(values=party.colors, labels=c("Democrat", "Republican")) +
+  scale_x_date(breaks=weeks, labels=weeklabels, name="Week") +
+  scale_y_continuous(name="Normalized POI visits", limits=c(0.3,1)) +
+  guides(color=guide_legend(title="County partisan lean")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.caption = element_text(hjust=0, face="italic")) +
+  labs(title="Republican-leaning counties show a shallower drop-off in POI visits",
+       subtitle="Normalized POI visits by week and county partisan lean, with state SIPO effective dates",
+       caption="POI visits in the week of January 27 are used as the baseline.")
+
+ggplot(il.charts1) +
+  geom_line(aes(x=week_start_date, y=adj_mean_dlh, color=republican)) +
+  geom_vline(xintercept=as_date("2020-03-20"), linetype="dashed") +
+  geom_vline(xintercept=as_date("2020-05-29"), linetype="dashed") +
+  scale_color_manual(values=party.colors, labels=c("Democrat", "Republican")) +
+  scale_x_date(breaks=weeks, labels=weeklabels, name="Week") +
+  scale_y_continuous(name="Share of visitors devices leaving home") +
+  guides(color=guide_legend(title="County partisan lean")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.caption = element_text(hjust=0, face="italic")) +
+  labs(title="Republican counties show a shallower drop-off in devices leaving home",
+       subtitle="Normalized devices leaving home by week and county partisan lean",
+       caption="Devices leaving home in the week of January 27 are used as the baseline.")
+
+ggplot(il.charts1) +
+  geom_line(aes(x=week_start_date, y=adj_mean_nhdt, color=republican)) +
+  geom_vline(xintercept=as_date("2020-03-20"), linetype="dashed") +
+  geom_vline(xintercept=as_date("2020-05-29"), linetype="dashed") +
+  scale_color_manual(values=party.colors, labels=c("Democrat", "Republican")) +
+  scale_x_date(breaks=weeks, labels=weeklabels, name="Week") +
+  scale_y_continuous(name="Share of time spent outside the home") +
+  guides(color=guide_legend(title="County partisan lean")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.caption = element_text(hjust=0, face="italic")) +
+  labs(title="Republican counties show a shallower drop-off in time outside the home",
+       subtitle="Normalized time outside the home by week and county partisan lean",
+       caption="Time outside the home in the week of January 27 are used as the baseline.")
+```
+```{r}
+il.charts2 <- illinois %>% 
+  mutate(republican = as.factor(ifelse(trump_vote_share > med_trump_il, 1, 0)),
+         cases = exp(log_cases)-1,
+         deaths = exp(log_deaths)-1) %>% 
+  group_by(republican, week_start_date) %>% 
+  summarize(total_cases = sum(cases, na.rm=TRUE),
+            total_deaths = sum(deaths, na.rm=TRUE)) %>% 
+  gather(key="measure", value="count", total_cases, total_deaths) %>% 
+  ungroup()
+
+ggplot(il.charts2) +
+  geom_line(aes(x=week_start_date, y=count, color=republican, linetype=measure)) +
+  scale_x_date(breaks=weeks, labels=weeklabels, name="Week") +
+  scale_y_continuous(label=scales::comma, name="Count") +
+  scale_color_manual(values=party.colors, labels=c("Democrat", "Republican"), name="Partisan lean") +
+  scale_linetype_manual(values=c("solid","dashed"), labels=c("Cases", "Deaths"), name="Outcome") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.caption = element_text(hjust=0, face="italic")) +
+  labs(title="Democratic-leaning counties in Illinois bear the brunt of COVID-19 incidence",
+       subtitle="Cases and deaths by county partisan lean and week")
+```
+
+
+```{r}
+m1.il <- plm(log_total_visits ~ trump_vote_share + week_start_date,
+             data = illinois,
+             index = c("county_fips", "week_start_date"),
+             model = "within")
+
+m1.il.coefs <- tidy(coeftest(
+  m1.il, vcov=vcovHC(m1.il, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="week_start_date2020-01-27", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+# m1.il.coefs.plot <- 
+ggplot(m1.il.coefs) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_errorbar(aes(x=term, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+  geom_point(aes(x=term, y=percent_difference), size=2.5, color="red") +
+  coord_cartesian(ylim=c(0, .9)) +
+  scale_y_continuous(name="Partisan difference") +
+  scale_x_discrete(name="Week",
+                   labels=c("Jan 27", "Feb 3", "Feb 10", "Feb 17", "Feb 24",
+                            "Mar 2", "Mar 9", "Mar 16", "Mar 23", "Mar 30",
+                            "Apr 6", "Apr 13", "Apr 20", "Apr 27",
+                            "May 4", "May 11", "May 18", "May 25")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.caption = element_text(hjust=0)) +
+  labs(title="Percentage difference in POI visits by county partisanship",
+       subtitle="For weeks January-May 2020, Illinois")
+```
+
+```{r}
+# Generate new dataframe with the two weeks_since variables
+il.weeks.since <- illinois %>%
+  group_by(county_fips) %>% 
+  
+  # Generate weeks_since variables using the weekly_sipo_binary variable that signals whether there was a SIPO
+  # at any time in the county-week observation
+  mutate(sip_start_week_relative = ifelse(weekly_sipo_binary == 1 & dplyr::lag(weekly_sipo_binary) == 0, 0, NA),
+         sip_end_week_relative = ifelse(weekly_sipo_binary == 1 & dplyr::lead(weekly_sipo_binary) == 0, 0, NA),
+         weeknum = row_number(),
+         sip_start_week_sub = ifelse(sip_start_week_relative == 0, weeknum, NA),
+         sip_end_week_sub = ifelse(sip_end_week_relative == 0, weeknum, NA)) %>% 
+  fill(sip_start_week_sub, sip_end_week_sub) %>% 
+  fill(sip_start_week_sub, sip_end_week_sub, .direction="up") %>% 
+  ungroup() %>% 
+  mutate(weeks_since_start = as.factor(weeknum - sip_start_week_sub),
+         weeks_since_end = as.factor(weeknum - sip_end_week_sub)) %>% 
+  
+  # Clean up unnecessary vars
+  select(-c(sip_start_week_relative, sip_end_week_relative, weeknum, sip_start_week_sub, sip_end_week_sub))
+
+
+m1.il.ws <- plm(log_total_visits ~ trump_vote_share + weeks_since_start,
+                data = il.weeks.since,
+                index = c("county_fips", "weeks_since_start"),
+                model = "within")
+
+m1.il.ws.coefs <- tidy(coeftest(
+  m1.il.ws, vcov=vcovHC(m1.il.ws, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_start-7", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+# m1.il.ws.coefs.plot <- 
+m1.il.ws.coefs %>% 
+  #filter(row_number() <= 14) %>% 
+  ggplot(.) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+  geom_point(aes(x=weekorder, y=percent_difference), size=2.5, color="red") +
+  coord_cartesian(ylim=c(-.1, .9)) +
+  scale_y_continuous(name="Partisan difference") +
+  scale_x_discrete(name="Weeks since SIPO effective date",
+                   labels=c("-7", "-6", "-5", "-4", "-3", "-2", "-1",
+                            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")) +
+  theme_bw() +
+  labs(title="Percentage difference in POI visits by county partisanship",
+       subtitle="By week since SIPO effective date, Illinois")
+```
+
+
+
+
+
+```{r}
+il.weeks.since.controls <- il.weeks.since %>% 
+  group_by(week_start_date) %>% 
+  mutate(cases_decile = as.factor(ntile(log_cases,10)),
+         deaths_decile = as.factor(ntile(log_deaths, 10))) %>% 
+  ungroup()
+
+for (var in c("cases_decile", "deaths_decile")) {
+  for (i in 1:10) {
+    varname <- paste0(var, "_", i)
+    il.weeks.since.controls[[varname]] <- ifelse(il.weeks.since.controls[[var]] == i, 1, 0)
+  }
+}
+
+il.weeks.since.controls.analysis <- il.weeks.since.controls %>% 
+  select(county_fips, weeks_since_start, log_total_visits, trump_vote_share, 
+         share_asian:mean_tmax, weekly_sipo_binary:log_pop_density, cases_decile_1:deaths_decile_10)
+n <- names(il.weeks.since.controls.analysis)
+```
+
+
+```{r}
+# MODEL 2: HEALTH/ECON/DEMO CONTROLS
+m1.il.ws.c <- plm(as.formula(paste("log_total_visits ~", paste(n[!n %in% "log_total_visits"], collapse = " + "))),
+                  data = il.weeks.since.controls.analysis,
+                  index = c("county_fips", "weeks_since_start"),
+                  model = "within")
+
+m1.il.ws.c.coefs <- tidy(coeftest(
+  m1.il.ws.c, vcov=vcovHC(m1.il.ws.c, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_start-7", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+# m1.il.ws.c.coefs.plot <- 
+m1.il.ws.c.coefs %>% 
+  filter(row_number() <= 17) %>% 
+  ggplot(.) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+  geom_point(aes(x=weekorder, y=percent_difference), size=2.5, color="red") +
+  coord_cartesian(ylim=c(-.1, .9)) +
+  scale_y_continuous(name="Partisan difference") +
+  scale_x_discrete(name="Weeks since SIPO effective date",
+                   labels=c("-7", "-6", "-5", "-4", "-3", "-2", "-1",
+                            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9")) +
+  theme_bw() +
+  labs(title="Percentage difference in POI visits by county partisanship",
+       subtitle="By week since SIPO effective date, Illinois. Includes health, policy, and demographic controls.")
+```
+
+
+```{r}
+il.weeks.since.controls.analysis.tt <- il.weeks.since.controls.analysis %>% 
+  group_by(county_fips) %>% 
+  mutate(lag1 = dplyr::lag(log_total_visits, n=1L),
+         lag2 = dplyr::lag(log_total_visits, n=2L),
+         lag3 = dplyr::lag(log_total_visits, n=3L)) %>% 
+  ungroup()
+
+# MODEL 3: CONTROLS + TIME TREND
+m1.il.ws.tt <- plm(as.formula(paste("log_total_visits ~", paste(n[!n %in% "log_total_visits"], collapse = " + "))),
+                  data = il.weeks.since.controls.analysis.tt,
+                  index = c("county_fips", "weeks_since_start"),
+                  model = "within")
+
+m1.il.ws.tt.coefs <- tidy(coeftest(
+  m1.il.ws.tt, vcov=vcovHC(m1.il.ws.tt, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_start-6", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+m1.il.ws.tt.coefs %>% 
+  filter(row_number() <= 16) %>% 
+  ggplot(.) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high), width=0.15, size=1.15, color="darkgray") +
+  geom_point(aes(x=weekorder, y=percent_difference), size=2.5, color="red") +
+  coord_cartesian(ylim=c(-.1, .9)) +
+  scale_y_continuous(name="Partisan difference") +
+  scale_x_discrete(name="Weeks since SIPO effective date",
+                   labels=c("-7", "-6", "-5", "-4", "-3", "-2", "-1",
+                            "0", "1", "2", "3", "4", "5", "6", "7", "8")) +
+  theme_bw() +
+  labs(title="Percentage difference in POI visits by county partisanship",
+       subtitle="By week since SIPO effective date, Illinois. Controlling for time trend")
+```
+

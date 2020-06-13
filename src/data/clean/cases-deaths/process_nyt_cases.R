@@ -26,10 +26,17 @@ nyc.size <- size %>%
   group_by(county_fips) %>% 
   summarize(km_sq = sum(km_sq))
 
+missing.sizes <- tibble(
+  county_fips = c("02230", "02275", "08014", "02158", "11001", "36115", "46102"),
+  km_sq = c(1170, 6620, 85.48, 44240, 158.1, 2150, 5420)
+)
+
 size.fix <- size %>% 
-  filter(!(county_fips %in% c("36005", "36047", "36061", "36081", "36115"))) %>% 
+  filter(!(county_fips %in% c("36005", "36047", "36061", "36081", "36115", 
+                              "02230", "02275", "08014", "30113", "51780"))) %>% 
   rbind(nyc.size) %>% 
-  arrange(county_fips)
+  rbind(missing.sizes) %>% 
+  arrange(county_fips) 
 
 
 
@@ -128,7 +135,7 @@ cases.daily <- daily.county %>%
          deaths = ifelse(is.na(deaths), 0, deaths),
          log_cases = log(1 + cases),
          log_deaths = log(1 + deaths),
-         log_pop_density = log(1 + popestimate2019 / km_sq))
+         log_pop_density = log(1 + (popestimate2019 / km_sq)))
 
 # Write out daily cases
 # write_csv(cases.daily, "data/interim/cases-deaths/nyt/nyt_cases_deaths_daily.csv.gz")

@@ -1,0 +1,301 @@
+---
+title: "Share adj attrition"
+author: "Alec MacMillen"
+date: "6/12/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+library(stargazer)
+library(lubridate)
+library(plm)
+library(lmtest)
+library(broom)
+library(multiwayvcov)
+library(fixest)
+library(clubSandwich)
+library(tidyverse)
+library(stargazer)
+library(here)
+library(tidylog)
+library(caret)
+library(choroplethr)
+library(choroplethrMaps)
+library(gridExtra)
+
+weeks <- c(as_date("2020-01-27"), as_date("2020-02-03"), as_date("2020-02-10"), 
+           as_date("2020-02-17"), as_date("2020-02-24"), as_date("2020-03-02"), 
+           as_date("2020-03-09"), as_date("2020-03-16"), as_date("2020-03-23"), 
+           as_date("2020-03-30"), as_date("2020-04-06"), as_date("2020-04-13"), 
+           as_date("2020-04-20"), as_date("2020-04-27"), as_date("2020-05-04"),
+           as_date("2020-05-11"), as_date("2020-05-18"), as_date("2020-05-25"))
+
+weeklabels <- c("Jan 27", "Feb 3", "Feb 10", "Feb 17", "Feb 24", "Mar 2", "Mar 9", 
+                "Mar 16", "Mar 23", "Mar 30", "Apr 6", "Apr 13", "Apr 20", "Apr 27",
+                "May 4", "May 11", "May 18", "May 25")
+
+party.colors <- c("#1000f7", "#f20019")
+```
+
+# First task: replicate Allcott POI regressions
+# Panel A: county and time FE only
+
+```{r}
+data <- read_csv(here::here("data/processed/allcott/allcott_full_build.csv.gz"))
+data.clean <- data %>% 
+  filter(!(is.na(county_fips)) & !(is.na(week_start_date))) %>% 
+  select(county_fips, week_start_date, everything()) %>% 
+  mutate(log_total_visitors_diff_cbg = log(1 + total_visitors_diff_cbg))
+```
+
+### ANALYSIS ON FULL DATA
+
+```{r}
+# Generate new dataframe with the two weeks_since variables
+weeks.since <- data.clean %>%
+  group_by(county_fips) %>% 
+  
+  # Generate weeks_since variables using the weekly_sipo_binary variable that signals whether there was a SIPO
+  # at any time in the county-week observation
+  mutate(sip_start_week_relative = ifelse(weekly_sipo_binary == 1 & dplyr::lag(weekly_sipo_binary) == 0, 0, NA),
+         sip_end_week_relative = ifelse(weekly_sipo_binary == 1 & dplyr::lead(weekly_sipo_binary) == 0, 0, NA),
+         weeknum = row_number(),
+         sip_start_week_sub = ifelse(sip_start_week_relative == 0, weeknum, NA),
+         sip_end_week_sub = ifelse(sip_end_week_relative == 0, weeknum, NA)) %>% 
+  fill(sip_start_week_sub, sip_end_week_sub) %>% 
+  fill(sip_start_week_sub, sip_end_week_sub, .direction="up") %>% 
+  ungroup() %>% 
+  mutate(weeks_since_start = as.factor(weeknum - sip_start_week_sub),
+         weeks_since_end = as.factor(weeknum - sip_end_week_sub)) %>% 
+  
+  # Clean up unnecessary vars
+  select(-c(sip_start_week_relative, sip_end_week_relative, weeknum, sip_start_week_sub, sip_end_week_sub))
+
+
+# MODEL 1: SIMPLE REGRESSION
+m3.ws <- plm(share_adj_attrition ~ trump_vote_share + weeks_since_start,
+             data = weeks.since,
+             index = c("county_fips", "weeks_since_start"),
+             model = "within")
+
+m3.ws.coefs <- tidy(coeftest(
+  m3.ws, vcov=vcovHC(m3.ws, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_start-10", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+```
+
+
+```{r}
+weeks.since.controls <- weeks.since %>% 
+  group_by(week_start_date) %>% 
+  mutate(cases_decile = as.factor(ntile(log_cases,10)),
+         deaths_decile = as.factor(ntile(log_deaths, 10))) %>% 
+  ungroup() %>% 
+  group_by(county_fips) %>% 
+  mutate(lag1 = dplyr::lag(share_adj_attrition, n=1L),
+         lag2 = dplyr::lag(share_adj_attrition, n=2L),
+         lag3 = dplyr::lag(share_adj_attrition, n=3L),
+         lead1 = dplyr::lead(share_adj_attrition, n=1L),
+         lead2 = dplyr::lead(share_adj_attrition, n=2L),
+         lead3 = dplyr::lead(share_adj_attrition, n=3L)) %>% 
+  ungroup()
+
+for (var in c("cases_decile", "deaths_decile")) {
+  for (i in 1:10) {
+    varname <- paste0(var, "_", i)
+    weeks.since.controls[[varname]] <- ifelse(weeks.since.controls[[var]] == i, 1, 0)
+  }
+}
+
+weeks.since.controls.analysis <- weeks.since.controls %>% 
+  select(county_fips, weeks_since_start, weeks_since_end, share_adj_attrition, trump_vote_share, 
+         share_asian:mean_tmax, weekly_sipo_binary:log_pop_density, lag1:deaths_decile_10)
+n <- names(weeks.since.controls.analysis)
+```
+
+
+```{r}
+# MODEL 2: CONTROLS
+m3.ws.c <- plm(as.formula(paste("share_adj_attrition ~", 
+                                paste(n[!n %in% c("share_adj_attrition", "county_fips", "weeks_since_end", 
+                                                  "lag1", "lag2", "lag3", "lead1", "lead2", "lead3")], 
+                                      collapse = " + "))),
+                data = weeks.since.controls.analysis,
+                index = c("county_fips", "weeks_since_start"),
+                model = "within")
+
+m3.ws.c.coefs <- tidy(coeftest(
+  m3.ws.c, vcov=vcovHC(m3.ws.c, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_start-10", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+```
+
+
+
+```{r}
+# MODEL 3: CONTROLS + TIME TRENDS
+m3.ws.ctt <- plm(as.formula(paste("share_adj_attrition ~", 
+                                paste(n[!n %in% c("share_adj_attrition", "county_fips", 
+                                                  "weeks_since_end", "lag3", "lead3")], 
+                                      collapse = " + "))),
+               data = weeks.since.controls.analysis,
+               index = c("county_fips", "weeks_since_start"),
+               model = "within")
+
+m3.ws.ctt.coefs <- tidy(coeftest(
+  m3.ws.ctt, vcov=vcovHC(m3.ws.ctt, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_start-8", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+```
+
+```{r}
+# Combine all 3 models into one plot
+m3.ws.estimates <- m3.ws.coefs %>% filter(row_number() >= 3 & row_number() <= 15) %>% mutate(model = 1)
+m3.ws.c.estimates <- m3.ws.c.coefs %>% filter(row_number() >= 3 & row_number() <= 15) %>% mutate(model = 2)
+m3.ws.ctt.estimates <- m3.ws.ctt.coefs %>% filter(row_number() <= 13) %>% mutate(model = 3)
+all.ws.estimates <- rbind(m3.ws.estimates, m3.ws.c.estimates, m3.ws.ctt.estimates) %>% 
+  mutate(model = as.factor(model)) %>% 
+  group_by(model) %>% 
+  mutate(weekorder = row_number() - 9,
+         weekorder_fac = as.factor(weekorder)) %>% 
+  ungroup()
+
+model.colors <- c("#158E01", "#F0731A", "#0CB8E1")
+
+ggplot(all.ws.estimates) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_vline(xintercept=0, linetype="dashed") +
+  scale_y_continuous(name="Partisan difference") +
+  scale_x_continuous(name="Weeks since SIPO effective start date",
+                     breaks=c(-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4),
+                     labels=c("-8", "-7", "-6", "-5", "-4", "-3", "-2", "-1", 
+                              "0", "1", "2", "3", "4")) +
+  scale_color_manual(name="Model",
+                     values=model.colors, 
+                     labels=c("County-week FE", "County controls", "Time trends")) +
+  geom_point(aes(x=weekorder, y=percent_difference, color=model), size=2.5) +
+  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high, color=model), width=0.15, size=1.15) +
+  geom_line(aes(x=weekorder, y=percent_difference, color=model), linetype="dotted", size=0.5) +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+
+
+### WEEKS SINCE SIPO END DATE
+
+```{r}
+# MODEL 1: SIMPLE REGRESSION
+m3.we <- plm(share_adj_attrition ~ trump_vote_share + weeks_since_end,
+             data = weeks.since,
+             index = c("county_fips", "weeks_since_end"),
+             model = "within")
+
+m3.we.coefs <- tidy(coeftest(
+  m3.we, vcov=vcovHC(m3.we, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_end-16", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+```
+
+```{r}
+# MODEL 2: CONTROLS
+m3.we.c <- plm(as.formula(paste("share_adj_attrition ~", 
+                                paste(n[!n %in% c("share_adj_attrition", "county_fips", "weeks_since_start", 
+                                                  "lag1", "lag2", "lag3", "lead1", "lead2", "lead3")], 
+                                      collapse = " + "))),
+                data = weeks.since.controls.analysis,
+                index = c("county_fips", "weeks_since_end"),
+                model = "within")
+
+m3.we.c.coefs <- tidy(coeftest(
+  m3.we.c, vcov=vcovHC(m3.we.c, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_end-16", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+```
+
+
+
+```{r}
+# MODEL 3: CONTROLS + TIME TREND
+m3.we.ctt <- plm(as.formula(paste("share_adj_attrition ~", 
+                                paste(n[!n %in% c("share_adj_attrition", "county_fips", 
+                                                  "weeks_since_start", "lag3", "lead3")], 
+                                      collapse = " + "))),
+               data = weeks.since.controls.analysis,
+               index = c("county_fips", "weeks_since_end"),
+               model = "within")
+
+m3.we.ctt.coefs <- tidy(coeftest(
+  m3.we.ctt, vcov=vcovHC(m3.we.ctt, type="sss", cluster="group"))) %>% 
+  tibble::add_row(., term="weeks_since_end-14", 
+                  estimate=0, std.error=0, statistic=0, p.value=0, .before=1) %>% 
+  mutate(weekorder = as.factor(row_number()),
+         percent_difference = -1*estimate,
+         high = percent_difference + 1.96*std.error,
+         low = percent_difference - 1.96*std.error)
+
+```
+
+```{r}
+# Combine all three weeks-since-end models into one plot
+# Combine all 3 models into one plot
+m3.we.estimates <- m3.we.coefs %>% 
+  filter((row_number() >= 13 & row_number() <= 20)) %>% 
+  mutate(model = 1)
+m3.we.c.estimates <- m3.we.c.coefs %>% 
+  filter((row_number() >= 13 & row_number() <= 20)) %>% 
+  mutate(model = 2)
+m3.we.ctt.estimates <- m3.we.ctt.coefs %>% 
+  filter((row_number() <= 18 & row_number() >= 11)) %>% 
+  mutate(model = 3)
+all.we.estimates <- rbind(m3.we.estimates, m3.we.c.estimates, m3.we.ctt.estimates) %>% 
+  mutate(model = as.factor(model)) %>% 
+  group_by(model) %>% 
+  mutate(weekorder = row_number(),
+         weekorder_fac = as.factor(weekorder)) %>% 
+  ungroup()
+
+ggplot(all.we.estimates) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_vline(xintercept=5, linetype="dashed") +
+  scale_y_continuous(name="Partisan difference") +
+  scale_x_continuous(name="Weeks since SIPO effective end date",
+                     breaks=c(1, 2, 3, 4, 5, 6, 7, 8),
+                     labels=c("-4", "-3", "-2", "-1", "0", "1", "2", "3")) +
+  scale_color_manual(name="Model",
+                     values=model.colors, 
+                     labels=c("County-week FE", "County controls", "Time trends")) +
+  geom_point(aes(x=weekorder, y=percent_difference, color=model), size=2.5) +
+  geom_errorbar(aes(x=weekorder, ymin=low, ymax=high, color=model), width=0.15, size=1.15) +
+  geom_line(aes(x=weekorder, y=percent_difference, color=model), linetype="dotted", size=0.5) +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+
+
+
